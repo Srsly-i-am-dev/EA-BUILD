@@ -1,0 +1,599 @@
+using cAlgo.API;
+using cAlgo.API.Indicators;
+using System;
+using System.Linq;
+
+namespace cAlgo.Robots
+{
+    [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
+    public class XAU_FibEMA_Intraday_ACTIVE_v2 : Robot
+    {
+        // =========================
+        // ORIGINAL PARAMETERS
+        // =========================
+        [Parameter("EMA Fast", DefaultValue = 50)]
+        public int EmaFast { get; set; }
+
+        [Parameter("EMA Slow", DefaultValue = 200)]
+        public int EmaSlow { get; set; }
+
+        [Parameter("ATR Period", DefaultValue = 14)]
+        public int AtrPeriod { get; set; }
+
+        [Parameter("Swing Lookback", DefaultValue = 15)]
+        public int SwingLookback { get; set; }
+
+        [Parameter("Min Impulse ATR", DefaultValue = 0.8)]
+        public double MinImpulseATR { get; set; }
+
+        [Parameter("Risk %", DefaultValue = 0.5)]
+        public double RiskPercent { get; set; }
+
+        [Parameter("Max Lots", DefaultValue = 0.5)]
+        public double MaxLots { get; set; }
+
+        [Parameter("Custom Stop Loss (pips, 0 = use original)", DefaultValue = 0)]
+        public double CustomSL { get; set; }
+
+        [Parameter("Custom Take Profit (pips, 0 = use original)", DefaultValue = 0)]
+        public double CustomTP { get; set; }
+
+        // =========================
+        // MINIMAL CORE FIXES (NEW)
+        // =========================
+        [Parameter("Parent Label", DefaultValue = "XAU_FIB_ACTIVE_V2")]
+        public string ParentLabel { get; set; }
+
+        [Parameter("Require Zone Exit Before Entry", DefaultValue = true)]
+        public bool RequireZoneExitBeforeEntry { get; set; }
+
+        [Parameter("Zone Exit Buffer (pips)", DefaultValue = 1.0)]
+        public double ZoneExitBufferPips { get; set; }
+
+        [Parameter("Cooldown After Close (bars)", DefaultValue = 6)]
+        public int CooldownBars { get; set; }
+
+        // =========================
+        // KILL SWITCH (MAX DRAWDOWN)
+        // =========================
+        public enum KillSwitchMode
+        {
+            Off = 0,
+            FromStartEquity = 1,
+            FromPeakEquity = 2
+        }
+
+        [Parameter("KillSwitch Mode (0=Off,1=StartEq,2=PeakEq)", DefaultValue = KillSwitchMode.FromPeakEquity)]
+        public KillSwitchMode KillMode { get; set; }
+
+        [Parameter("KillSwitch Max Drawdown %", DefaultValue = 6.0)]
+        public double KillSwitchMaxDDPercent { get; set; }
+
+        [Parameter("KillSwitch Close Positions", DefaultValue = true)]
+        public bool KillSwitchClosePositions { get; set; }
+
+        // =========================
+        // HEDGING (TAIL EVENT ONLY)
+        // =========================
+        public enum HedgeMode
+        {
+            Option1_SL_Proximity = 1,
+            Option2_ATR_Loss = 2
+        }
+
+        [Parameter("Enable Hedging", DefaultValue = true)]
+        public bool EnableHedging { get; set; }
+
+        [Parameter("Hedge Mode (1=Opt1, 2=Opt2)", DefaultValue = HedgeMode.Option2_ATR_Loss)]
+        public HedgeMode SelectedHedgeMode { get; set; }
+
+        // Non-negotiable gates
+        [Parameter("SmallLossIgnoreATR (ignore < this)", DefaultValue = 0.35)]
+        public double SmallLossIgnoreATR { get; set; }
+
+        [Parameter("Block Hedge If Parent Profit >= 0", DefaultValue = true)]
+        public bool BlockHedgeIfProfitNonNegative { get; set; }
+
+        // Execution protection
+        [Parameter("Max Hedge Spread (pips)", DefaultValue = 3.0)]
+        public double MaxHedgeSpreadPips { get; set; }
+
+        [Parameter("Max Hedges Per Parent", DefaultValue = 1)]
+        public int MaxHedgesPerParent { get; set; }
+
+        // Hedge SL/TP ATR
+        [Parameter("Hedge SL ATR", DefaultValue = 1.0)]
+        public double HedgeSL_ATR { get; set; }
+
+        [Parameter("Hedge TP ATR", DefaultValue = 1.2)]
+        public double HedgeTP_ATR { get; set; }
+
+        // Option 1 (SL proximity)
+        [Parameter("Opt1: Hedge At SL % (0.70..0.90)", DefaultValue = 0.85)]
+        public double Opt1_HedgeAtSLPercent { get; set; }
+
+        [Parameter("Opt1: Hedge Size Mult", DefaultValue = 0.9)]
+        public double Opt1_HedgeSizeMult { get; set; }
+
+        // Option 2 (loss in ATR)
+        [Parameter("Opt2: Hedge Loss ATR Trigger", DefaultValue = 1.25)]
+        public double Opt2_HedgeLossATR { get; set; }
+
+        [Parameter("Opt2: Min Minutes Before Hedge", DefaultValue = 15)]
+        public int Opt2_MinMinutesBeforeHedge { get; set; }
+
+        [Parameter("Opt2: Hedge Size Min Mult", DefaultValue = 0.5)]
+        public double Opt2_HedgeSizeMinMult { get; set; }
+
+        [Parameter("Opt2: Hedge Size Max Mult", DefaultValue = 0.8)]
+        public double Opt2_HedgeSizeMaxMult { get; set; }
+
+        [Parameter("Opt2: Release Hedge Within ATR (close hedge only)", DefaultValue = 0.35)]
+        public double Opt2_ReleaseWithinATR { get; set; }
+
+        // =========================
+        // INDICATORS / STATE
+        // =========================
+        private ExponentialMovingAverage emaFast, emaSlow;
+        private AverageTrueRange atr;
+
+        private bool setupActive;
+        private TradeType setupType;
+        private double fibLow, fibHigh;
+        private double sl, tp;
+        private int setupBarIndex;
+
+        // Core fix state
+        private bool zoneExited;
+        private int lastParentCloseBarIndex = int.MinValue;
+
+        // KillSwitch state
+        private bool _killed;
+        private double _equityAtStart;
+        private double _equityPeak;
+
+        protected override void OnStart()
+        {
+            emaFast = Indicators.ExponentialMovingAverage(Bars.ClosePrices, EmaFast);
+            emaSlow = Indicators.ExponentialMovingAverage(Bars.ClosePrices, EmaSlow);
+            atr = Indicators.AverageTrueRange(AtrPeriod, MovingAverageType.Simple);
+
+            _equityAtStart = Account.Equity;
+            _equityPeak = Account.Equity;
+            _killed = false;
+
+            // FIX: Use event subscription instead of overriding OnPositionClosed
+            Positions.Closed += OnPositionsClosed;
+        }
+
+        protected override void OnStop()
+        {
+            // Clean unsubscribe (prevents duplicated handlers after restarts)
+            Positions.Closed -= OnPositionsClosed;
+        }
+
+        protected override void OnBar()
+        {
+            UpdateKillSwitch();
+            if (_killed)
+                return;
+
+            int i = Bars.Count - 2;
+            if (i < SwingLookback + 5)
+                return;
+
+            if (!IsLondonOrNY())
+                return;
+
+            // CORE FIX: cooldown after parent close
+            if (IsInCooldown(i))
+                return;
+
+            // CORE FIX: symbol-level gating (not account-level Positions.Count)
+            if (Positions.FindAll(SymbolName).Length > 0 || setupActive)
+                return;
+
+            bool bullishTrend = emaFast.Result[i] > emaSlow.Result[i];
+            bool bearishTrend = emaFast.Result[i] < emaSlow.Result[i];
+
+            double high = double.MinValue;
+            double low = double.MaxValue;
+
+            for (int x = i - SwingLookback; x <= i; x++)
+            {
+                high = Math.Max(high, Bars.HighPrices[x]);
+                low = Math.Min(low, Bars.LowPrices[x]);
+            }
+
+            double impulse = high - low;
+            if (impulse < atr.Result[i] * MinImpulseATR)
+                return;
+
+            if (bullishTrend && IsBullishImpulse(i))
+            {
+                double f50 = high - impulse * 0.50;
+                double f618 = high - impulse * 0.618;
+
+                ActivateSetup(
+                    TradeType.Buy,
+                    Math.Min(f50, f618),
+                    Math.Max(f50, f618),
+                    Bars.LowPrices[i] - atr.Result[i] * 0.8,
+                    high + atr.Result[i] * 1.5,
+                    i
+                );
+            }
+            else if (bearishTrend && IsBearishImpulse(i))
+            {
+                double f50 = low + impulse * 0.50;
+                double f618 = low + impulse * 0.618;
+
+                ActivateSetup(
+                    TradeType.Sell,
+                    Math.Min(f50, f618),
+                    Math.Max(f50, f618),
+                    Bars.HighPrices[i] + atr.Result[i] * 0.8,
+                    low - atr.Result[i] * 1.5,
+                    i
+                );
+            }
+        }
+
+        protected override void OnTick()
+        {
+            UpdateKillSwitch();
+            if (_killed)
+                return;
+
+            // =========================
+            // A) ORIGINAL ENTRY LOGIC + CORE FIXES
+            // =========================
+            if (setupActive && Positions.FindAll(SymbolName).Length == 0)
+            {
+                int i = Bars.Count - 2;
+
+                // Cooldown: allow setup to exist, but avoid entering immediately after a stopout
+                if (!IsInCooldown(i))
+                {
+                    // setup valid for 3 bars
+                    if (Bars.Count - 2 > setupBarIndex + 3)
+                    {
+                        ResetSetup();
+                    }
+                    else
+                    {
+                        double price = setupType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
+
+                        // CORE FIX: require zone exit first, then allow re-entry into zone
+                        if (RequireZoneExitBeforeEntry)
+                        {
+                            double buffer = ZoneExitBufferPips * Symbol.PipSize;
+
+                            if (!zoneExited)
+                            {
+                                if (setupType == TradeType.Buy)
+                                {
+                                    if (Symbol.Bid > fibHigh + buffer)
+                                        zoneExited = true;
+                                }
+                                else
+                                {
+                                    if (Symbol.Ask < fibLow - buffer)
+                                        zoneExited = true;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            zoneExited = true;
+                        }
+
+                        if (zoneExited && price >= fibLow && price <= fibHigh)
+                        {
+                            ExecuteTrade(setupType, sl, tp);
+                            ResetSetup();
+                        }
+                    }
+                }
+            }
+
+            // =========================
+            // B) HEDGE MANAGER (TAIL EVENT ONLY)
+            // =========================
+            if (!EnableHedging)
+                return;
+
+            var parent = GetParentPosition();
+            if (parent == null)
+                return;
+
+            // Non-negotiable: never hedge winners
+            if (BlockHedgeIfProfitNonNegative && parent.GrossProfit >= 0)
+                return;
+
+            // Spread protection
+            if (Symbol.Spread > MaxHedgeSpreadPips)
+                return;
+
+            double atrP = atr.Result.LastValue;
+            if (atrP <= 0)
+                return;
+
+            double loss = ComputeLossPrice(parent);
+            double lossAtr = loss / atrP;
+
+            // Non-negotiable: ignore small losses
+            if (lossAtr < SmallLossIgnoreATR)
+                return;
+
+            var hedge = GetHedgeForParent(parent.Id);
+            if (hedge != null)
+            {
+                if (SelectedHedgeMode == HedgeMode.Option2_ATR_Loss)
+                    TryReleaseHedge_Option2(parent, hedge, atrP);
+
+                // IMPORTANT: no code closes parent on hedge TP
+                return;
+            }
+
+            if (CountHedgesForParent(parent.Id) >= MaxHedgesPerParent)
+                return;
+
+            if (SelectedHedgeMode == HedgeMode.Option1_SL_Proximity)
+                TryPlaceHedge_Option1(parent, atrP);
+            else
+                TryPlaceHedge_Option2(parent, atrP, lossAtr);
+        }
+
+        // =========================
+        // FIXED: POSITION CLOSED TRACKING (EVENT-BASED)
+        // =========================
+        private void OnPositionsClosed(PositionClosedEventArgs args)
+        {
+            var p = args.Position;
+
+            if (p.SymbolName != SymbolName)
+                return;
+
+            // Cooldown after PARENT closes only (not hedge closes)
+            if (p.Label == ParentLabel)
+            {
+                lastParentCloseBarIndex = Bars.Count - 2;
+            }
+        }
+
+        private bool IsInCooldown(int currentBarIndex)
+        {
+            if (CooldownBars <= 0)
+                return false;
+
+            if (lastParentCloseBarIndex == int.MinValue)
+                return false;
+
+            return currentBarIndex <= lastParentCloseBarIndex + CooldownBars;
+        }
+
+        // =========================
+        // KILL SWITCH LOGIC
+        // =========================
+        private void UpdateKillSwitch()
+        {
+            if (_killed)
+                return;
+
+            if (KillMode == KillSwitchMode.Off)
+                return;
+
+            if (Account.Equity > _equityPeak)
+                _equityPeak = Account.Equity;
+
+            double refEquity = (KillMode == KillSwitchMode.FromStartEquity) ? _equityAtStart : _equityPeak;
+            if (refEquity <= 0)
+                return;
+
+            double ddPct = (refEquity - Account.Equity) / refEquity * 100.0;
+
+            if (ddPct >= KillSwitchMaxDDPercent)
+            {
+                _killed = true;
+                Print("KILL SWITCH TRIGGERED: DD={0:F2}% (mode={1}). Trading halted.", ddPct, KillMode);
+
+                setupActive = false;
+
+                if (KillSwitchClosePositions)
+                    CloseAllSymbolPositions();
+            }
+        }
+
+        private void CloseAllSymbolPositions()
+        {
+            var pos = Positions.FindAll(SymbolName);
+            foreach (var p in pos)
+                ClosePosition(p);
+        }
+
+        // =========================
+        // ORIGINAL HELPERS (UNCHANGED)
+        // =========================
+        private void ActivateSetup(TradeType type, double fLow, double fHigh, double slBase, double tpBase, int barIndex)
+        {
+            setupType = type;
+            fibLow = fLow;
+            fibHigh = fHigh;
+            sl = slBase;
+            tp = tpBase;
+            setupBarIndex = barIndex;
+            setupActive = true;
+
+            // Core fix init
+            zoneExited = !RequireZoneExitBeforeEntry;
+        }
+
+        private void ResetSetup()
+        {
+            setupActive = false;
+            zoneExited = false;
+        }
+
+        private void ExecuteTrade(TradeType type, double slBase, double tpBase)
+        {
+            double entry = type == TradeType.Buy ? Symbol.Ask : Symbol.Bid;
+
+            double finalSL = slBase;
+            double finalTP = tpBase;
+
+            if (CustomSL > 0)
+            {
+                if (type == TradeType.Buy)
+                    finalSL = entry - CustomSL * Symbol.PipSize;
+                else
+                    finalSL = entry + CustomSL * Symbol.PipSize;
+            }
+
+            if (CustomTP > 0)
+            {
+                if (type == TradeType.Buy)
+                    finalTP = entry + CustomTP * Symbol.PipSize;
+                else
+                    finalTP = entry - CustomTP * Symbol.PipSize;
+            }
+
+            double riskPips = Math.Abs(entry - finalSL) / Symbol.PipSize;
+            if (riskPips < 5)
+                return;
+
+            double riskMoney = Account.Balance * (RiskPercent / 100);
+            double volumeUnits = riskMoney / (riskPips * Symbol.PipValue);
+            volumeUnits = Math.Min(volumeUnits, Symbol.QuantityToVolumeInUnits(MaxLots));
+            volumeUnits = Symbol.NormalizeVolumeInUnits(volumeUnits);
+
+            var result = ExecuteMarketOrder(type, SymbolName, volumeUnits, ParentLabel);
+            if (result != null && result.IsSuccessful && result.Position != null)
+                ModifyPosition(result.Position, finalSL, finalTP, ProtectionType.Absolute);
+        }
+
+        private bool IsBullishImpulse(int i)
+        {
+            return Bars.ClosePrices[i] > Bars.OpenPrices[i] &&
+                   (Bars.ClosePrices[i] - Bars.OpenPrices[i]) > atr.Result[i] * 0.4;
+        }
+
+        private bool IsBearishImpulse(int i)
+        {
+            return Bars.ClosePrices[i] < Bars.OpenPrices[i] &&
+                   (Bars.OpenPrices[i] - Bars.ClosePrices[i]) > atr.Result[i] * 0.4;
+        }
+
+        private bool IsLondonOrNY()
+        {
+            int h = Server.Time.Hour;
+            return h >= 7 && h <= 21;
+        }
+
+        // =========================
+        // HEDGE CORE (TAIL EVENTS ONLY)
+        // =========================
+        private void TryPlaceHedge_Option1(Position parent, double atrP)
+        {
+            if (parent.StopLoss == null)
+                return;
+
+            double slPrice = parent.StopLoss.Value;
+            double entry = parent.EntryPrice;
+
+            double slDist = Math.Abs(entry - slPrice);
+            if (slDist <= Symbol.PipSize)
+                return;
+
+            double lossPrice = ComputeLossPrice(parent);
+
+            if (lossPrice < slDist * Opt1_HedgeAtSLPercent)
+                return;
+
+            double hedgeVol = parent.VolumeInUnits * Opt1_HedgeSizeMult;
+            hedgeVol = Symbol.NormalizeVolumeInUnits(hedgeVol);
+
+            PlaceHedge(parent, hedgeVol, atrP);
+        }
+
+        private void TryPlaceHedge_Option2(Position parent, double atrP, double lossAtr)
+        {
+            if ((Server.Time - parent.EntryTime).TotalMinutes < Opt2_MinMinutesBeforeHedge)
+                return;
+
+            if (lossAtr < Opt2_HedgeLossATR)
+                return;
+
+            double t = lossAtr / Math.Max(Opt2_HedgeLossATR, 0.0001);
+            double mult = Clamp(t, Opt2_HedgeSizeMinMult, Opt2_HedgeSizeMaxMult);
+
+            double hedgeVol = parent.VolumeInUnits * mult;
+            hedgeVol = Symbol.NormalizeVolumeInUnits(hedgeVol);
+
+            PlaceHedge(parent, hedgeVol, atrP);
+        }
+
+        private void TryReleaseHedge_Option2(Position parent, Position hedge, double atrP)
+        {
+            double distToEntry = parent.TradeType == TradeType.Buy
+                ? Math.Abs(Symbol.Bid - parent.EntryPrice)
+                : Math.Abs(Symbol.Ask - parent.EntryPrice);
+
+            if (distToEntry <= atrP * Opt2_ReleaseWithinATR)
+                ClosePosition(hedge);
+        }
+
+        private void PlaceHedge(Position parent, double hedgeVolumeUnits, double atrP)
+        {
+            var hedgeType = parent.TradeType == TradeType.Buy ? TradeType.Sell : TradeType.Buy;
+            string hedgeLabel = HedgeLabel(parent.Id);
+
+            double hedgeEntry = hedgeType == TradeType.Buy ? Symbol.Ask : Symbol.Bid;
+            double hedgeSL = hedgeType == TradeType.Buy ? hedgeEntry - atrP * HedgeSL_ATR : hedgeEntry + atrP * HedgeSL_ATR;
+            double hedgeTP = hedgeType == TradeType.Buy ? hedgeEntry + atrP * HedgeTP_ATR : hedgeEntry - atrP * HedgeTP_ATR;
+
+            var hedgeResult = ExecuteMarketOrder(hedgeType, SymbolName, hedgeVolumeUnits, hedgeLabel);
+            if (hedgeResult != null && hedgeResult.IsSuccessful && hedgeResult.Position != null)
+                ModifyPosition(hedgeResult.Position, hedgeSL, hedgeTP, ProtectionType.Absolute);
+
+            // IMPORTANT: no parent-close logic exists on hedge TP.
+        }
+
+        // =========================
+        // POSITION / LABEL HELPERS
+        // =========================
+        private Position GetParentPosition()
+        {
+            return Positions.FindAll(ParentLabel, SymbolName).FirstOrDefault();
+        }
+
+        private string HedgeLabel(long parentId) => $"{ParentLabel}|HEDGE|{parentId}";
+
+        private Position GetHedgeForParent(long parentId)
+        {
+            string lbl = HedgeLabel(parentId);
+            return Positions.FindAll(SymbolName).FirstOrDefault(p => p.Label == lbl);
+        }
+
+        private int CountHedgesForParent(long parentId)
+        {
+            string lbl = HedgeLabel(parentId);
+            return Positions.FindAll(SymbolName).Count(p => p.Label == lbl);
+        }
+
+        private double ComputeLossPrice(Position parent)
+        {
+            if (parent.TradeType == TradeType.Buy)
+                return Math.Max(0, parent.EntryPrice - Symbol.Bid);
+            else
+                return Math.Max(0, Symbol.Ask - parent.EntryPrice);
+        }
+
+        private double Clamp(double v, double lo, double hi)
+        {
+            if (v < lo) return lo;
+            if (v > hi) return hi;
+            return v;
+        }
+    }
+}

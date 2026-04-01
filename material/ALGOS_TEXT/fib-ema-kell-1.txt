@@ -1,0 +1,494 @@
+using cAlgo.API;
+using cAlgo.API.Indicators;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+
+namespace cAlgo.Robots
+{
+    [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
+    public class XAU_FibEMA_Intraday_ACTIVE_v2 : Robot
+    {
+        [Parameter("EMA Fast", DefaultValue = 50)]
+        public int EmaFast { get; set; }
+
+        [Parameter("EMA Slow", DefaultValue = 200)]
+        public int EmaSlow { get; set; }
+
+        [Parameter("ATR Period", DefaultValue = 14)]
+        public int AtrPeriod { get; set; }
+
+        [Parameter("Swing Lookback", DefaultValue = 15)]
+        public int SwingLookback { get; set; }
+
+        [Parameter("Min Impulse ATR", DefaultValue = 0.8)]
+        public double MinImpulseATR { get; set; }
+
+        // Fallback risk (used if Kelly disabled or insufficient stats)
+        [Parameter("Risk % (Fallback)", DefaultValue = 0.5)]
+        public double RiskPercent { get; set; }
+
+        [Parameter("Max Lots", DefaultValue = 0.5)]
+        public double MaxLots { get; set; }
+
+        // -----------------------------------------------
+        // OPTIONAL CUSTOM SL/TP (no core logic change)
+        // -----------------------------------------------
+        [Parameter("Custom Stop Loss (pips, 0 = use original)", DefaultValue = 0)]
+        public double CustomSL { get; set; }
+
+        [Parameter("Custom Take Profit (pips, 0 = use original)", DefaultValue = 0)]
+        public double CustomTP { get; set; }
+        // -----------------------------------------------
+
+        // -----------------------------------------------
+        // KELLY POSITION SIZING (best type: FRACTIONAL KELLY + HARD CAPS)
+        // -----------------------------------------------
+        [Parameter("Use Kelly Sizing", DefaultValue = true)]
+        public bool UseKellySizing { get; set; }
+
+        [Parameter("Kelly Lookback Trades", DefaultValue = 50, MinValue = 10)]
+        public int KellyLookbackTrades { get; set; }
+
+        [Parameter("Kelly Min Trades", DefaultValue = 20, MinValue = 5)]
+        public int KellyMinTrades { get; set; }
+
+        [Parameter("Fractional Kelly (0..1)", DefaultValue = 0.25, MinValue = 0.0, MaxValue = 1.0)]
+        public double FractionalKelly { get; set; }
+
+        [Parameter("Kelly Max Risk %", DefaultValue = 1.0, MinValue = 0.1)]
+        public double KellyMaxRiskPercent { get; set; }
+
+        [Parameter("Skip Trade If Kelly <= 0", DefaultValue = true)]
+        public bool SkipIfKellyNonPositive { get; set; }
+        // -----------------------------------------------
+
+        private ExponentialMovingAverage emaFast, emaSlow;
+        private AverageTrueRange atr;
+
+        private bool setupActive;
+        private TradeType setupType;
+        private double fibLow, fibHigh;
+        private double sl, tp;
+        private int setupBarIndex;
+
+        private const string BotLabel = "XAU_FIB_ACTIVE_V2";
+
+        // Rolling trade results for Kelly
+        private readonly List<double> _closedTradePnLs = new List<double>();
+
+        protected override void OnStart()
+        {
+            emaFast = Indicators.ExponentialMovingAverage(Bars.ClosePrices, EmaFast);
+            emaSlow = Indicators.ExponentialMovingAverage(Bars.ClosePrices, EmaSlow);
+            atr = Indicators.AverageTrueRange(AtrPeriod, MovingAverageType.Simple);
+
+            // Collect PnL from trades closed during the run/backtest
+            Positions.Closed += OnPositionClosed;
+
+            // Seed Kelly stats from history WITHOUT using History.Trades at compile-time
+            SeedClosedTradesFromHistory_ReflectionSafe();
+        }
+
+        protected override void OnBar()
+        {
+            int i = Bars.Count - 2;
+            if (i < SwingLookback + 5)
+                return;
+
+            if (!IsLondonOrNY())
+                return;
+
+            if (Positions.Count > 0 || setupActive)
+                return;
+
+            bool bullishTrend = emaFast.Result[i] > emaSlow.Result[i];
+            bool bearishTrend = emaFast.Result[i] < emaSlow.Result[i];
+
+            double high = double.MinValue;
+            double low = double.MaxValue;
+
+            for (int x = i - SwingLookback; x <= i; x++)
+            {
+                high = Math.Max(high, Bars.HighPrices[x]);
+                low = Math.Min(low, Bars.LowPrices[x]);
+            }
+
+            double impulse = high - low;
+            if (impulse < atr.Result[i] * MinImpulseATR)
+                return;
+
+            if (bullishTrend && IsBullishImpulse(i))
+            {
+                double f50 = high - impulse * 0.50;
+                double f618 = high - impulse * 0.618;
+
+                ActivateSetup(
+                    TradeType.Buy,
+                    Math.Min(f50, f618),
+                    Math.Max(f50, f618),
+                    Bars.LowPrices[i] - atr.Result[i] * 0.8,
+                    high + atr.Result[i] * 1.5,
+                    i
+                );
+            }
+            else if (bearishTrend && IsBearishImpulse(i))
+            {
+                double f50 = low + impulse * 0.50;
+                double f618 = low + impulse * 0.618;
+
+                ActivateSetup(
+                    TradeType.Sell,
+                    Math.Min(f50, f618),
+                    Math.Max(f50, f618),
+                    Bars.HighPrices[i] + atr.Result[i] * 0.8,
+                    low - atr.Result[i] * 1.5,
+                    i
+                );
+            }
+        }
+
+        protected override void OnTick()
+        {
+            if (!setupActive || Positions.Count > 0)
+                return;
+
+            // setup valid for 3 bars
+            if (Bars.Count - 2 > setupBarIndex + 3)
+            {
+                ResetSetup();
+                return;
+            }
+
+            double price = setupType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
+
+            if (price >= fibLow && price <= fibHigh)
+            {
+                ExecuteTrade(setupType, sl, tp);
+                ResetSetup();
+            }
+        }
+
+        private void ActivateSetup(TradeType type, double fLow, double fHigh, double slBase, double tpBase, int barIndex)
+        {
+            setupType = type;
+            fibLow = fLow;
+            fibHigh = fHigh;
+            sl = slBase;
+            tp = tpBase;
+            setupBarIndex = barIndex;
+            setupActive = true;
+        }
+
+        private void ResetSetup()
+        {
+            setupActive = false;
+        }
+
+        private void ExecuteTrade(TradeType type, double slBase, double tpBase)
+        {
+            double entry = type == TradeType.Buy ? Symbol.Ask : Symbol.Bid;
+
+            // APPLY CUSTOM SL/TP ONLY IF USER SETS NON-ZERO VALUES (core logic unchanged)
+            double finalSL = slBase;
+            double finalTP = tpBase;
+
+            if (CustomSL > 0)
+            {
+                finalSL = type == TradeType.Buy
+                    ? entry - CustomSL * Symbol.PipSize
+                    : entry + CustomSL * Symbol.PipSize;
+            }
+
+            if (CustomTP > 0)
+            {
+                finalTP = type == TradeType.Buy
+                    ? entry + CustomTP * Symbol.PipSize
+                    : entry - CustomTP * Symbol.PipSize;
+            }
+
+            double riskPips = Math.Abs(entry - finalSL) / Symbol.PipSize;
+            if (riskPips < 5)
+                return;
+
+            double riskPercentToUse = GetRiskPercentToUse();
+            if (riskPercentToUse <= 0)
+                return;
+
+            // Risk money based on balance
+            double riskMoney = Account.Balance * (riskPercentToUse / 100.0);
+
+            // Correct pip value per unit conversion
+            if (Symbol.LotSize <= 0 || Symbol.PipValue <= 0)
+                return;
+
+            double pipValuePerUnit = Symbol.PipValue / Symbol.LotSize; // money per pip per 1 unit
+            double volumeUnits = riskMoney / (riskPips * pipValuePerUnit);
+
+            // Cap by MaxLots
+            double capUnits = Symbol.QuantityToVolumeInUnits(MaxLots);
+            volumeUnits = Math.Min(volumeUnits, capUnits);
+            volumeUnits = Symbol.NormalizeVolumeInUnits(volumeUnits);
+
+            if (volumeUnits < Symbol.VolumeInUnitsMin)
+                return;
+
+            ExecuteMarketOrder(type, SymbolName, volumeUnits, BotLabel, finalSL, finalTP);
+        }
+
+        private double GetRiskPercentToUse()
+        {
+            if (!UseKellySizing)
+                return RiskPercent;
+
+            if (_closedTradePnLs.Count < KellyMinTrades)
+                return RiskPercent;
+
+            var recent = _closedTradePnLs
+                .Skip(Math.Max(0, _closedTradePnLs.Count - KellyLookbackTrades))
+                .ToArray();
+
+            int wins = recent.Count(x => x > 0);
+            int losses = recent.Count(x => x < 0);
+
+            if (wins == 0 || losses == 0)
+                return RiskPercent;
+
+            double p = (double)wins / recent.Length;
+
+            double avgWin = recent.Where(x => x > 0).Average();
+            double avgLossAbs = Math.Abs(recent.Where(x => x < 0).Average());
+
+            if (avgWin <= 0 || avgLossAbs <= 0)
+                return RiskPercent;
+
+            double b = avgWin / avgLossAbs;
+
+            // Kelly: f* = p - (1-p)/b
+            double kelly = p - ((1.0 - p) / b);
+
+            if (kelly <= 0)
+            {
+                if (SkipIfKellyNonPositive)
+                    return 0;
+                return Math.Min(RiskPercent, KellyMaxRiskPercent);
+            }
+
+            double fractional = kelly * FractionalKelly;
+            double riskPercent = fractional * 100.0;
+            return Math.Min(riskPercent, KellyMaxRiskPercent);
+        }
+
+        private void OnPositionClosed(PositionClosedEventArgs args)
+        {
+            var p = args.Position;
+            if (p == null)
+                return;
+
+            if (p.SymbolName != SymbolName)
+                return;
+
+            if (!string.Equals(p.Label, BotLabel, StringComparison.Ordinal))
+                return;
+
+            _closedTradePnLs.Add(p.NetProfit);
+
+            int maxKeep = Math.Max(KellyLookbackTrades * 3, 200);
+            if (_closedTradePnLs.Count > maxKeep)
+                _closedTradePnLs.RemoveRange(0, _closedTradePnLs.Count - maxKeep);
+        }
+
+        // --------------------------------------------------------------------
+        // HISTORY SEEDING: REFLECTION-SAFE (NO History.Trades COMPILE DEPENDENCY)
+        // --------------------------------------------------------------------
+        private void SeedClosedTradesFromHistory_ReflectionSafe()
+        {
+            try
+            {
+                // 1) Try property "Trades" if it exists (some API versions)
+                var histType = History.GetType();
+                var tradesProp = histType.GetProperty("Trades", BindingFlags.Public | BindingFlags.Instance);
+
+                if (tradesProp != null)
+                {
+                    var tradesObj = tradesProp.GetValue(History, null);
+                    TryConsumeTradeEnumerable(tradesObj);
+                    TrimClosedPnLs();
+                    return;
+                }
+
+                // 2) Try methods that might exist: FindAllTrades / GetTrades / etc.
+                // We keep it generic: find any public instance method that returns IEnumerable and has 0..4 params.
+                var methods = histType.GetMethods(BindingFlags.Public | BindingFlags.Instance);
+
+                foreach (var m in methods)
+                {
+                    if (!typeof(IEnumerable).IsAssignableFrom(m.ReturnType))
+                        continue;
+
+                    var ps = m.GetParameters();
+                    if (ps.Length > 4)
+                        continue;
+
+                    object result = null;
+
+                    // Try invoking with "safe" defaults if possible
+                    // (we avoid guessing signatures too hard)
+                    try
+                    {
+                        object[] args = BuildDefaultArgs(ps);
+                        if (args == null)
+                            continue;
+
+                        result = m.Invoke(History, args);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    if (result != null)
+                    {
+                        // If it looks like trades, consume it
+                        bool addedAny = TryConsumeTradeEnumerable(result);
+                        if (addedAny)
+                        {
+                            TrimClosedPnLs();
+                            return;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // No seeding possible; Kelly will build stats during run via Positions.Closed
+            }
+        }
+
+        private object[] BuildDefaultArgs(ParameterInfo[] ps)
+        {
+            // Only provide args we can safely construct without knowing user environment.
+            // If we can't, return null and skip.
+            var args = new object[ps.Length];
+
+            for (int i = 0; i < ps.Length; i++)
+            {
+                var t = ps[i].ParameterType;
+
+                if (t == typeof(string))
+                    args[i] = SymbolName; // most common
+                else if (t == typeof(DateTime))
+                    args[i] = DateTime.MinValue;
+                else if (t == typeof(bool))
+                    args[i] = false;
+                else if (t.IsValueType)
+                    args[i] = Activator.CreateInstance(t);
+                else
+                    return null; // unknown reference types -> skip
+            }
+
+            return args;
+        }
+
+        private bool TryConsumeTradeEnumerable(object tradesObj)
+        {
+            if (tradesObj == null)
+                return false;
+
+            var enumerable = tradesObj as IEnumerable;
+            if (enumerable == null)
+                return false;
+
+            var temp = new List<Tuple<DateTime, double>>();
+
+            foreach (var t in enumerable)
+            {
+                if (t == null)
+                    continue;
+
+                string sym = GetProp<string>(t, "SymbolName", "SymbolCode", "Symbol");
+                if (!string.Equals(sym, SymbolName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                string label = GetProp<string>(t, "Label", "Comment");
+                if (!string.Equals(label, BotLabel, StringComparison.Ordinal))
+                    continue;
+
+                double net = GetProp<double>(t, "NetProfit", "NetPnL", "Profit");
+                DateTime ct = GetProp<DateTime>(t, "ClosingTime", "CloseTime", "Time");
+
+                temp.Add(Tuple.Create(ct, net));
+            }
+
+            if (temp.Count == 0)
+                return false;
+
+            // sort if we got valid times
+            temp = temp.OrderBy(x => x.Item1).ToList();
+
+            foreach (var x in temp)
+                _closedTradePnLs.Add(x.Item2);
+
+            return true;
+        }
+
+        private T GetProp<T>(object obj, params string[] names)
+        {
+            try
+            {
+                var type = obj.GetType();
+                foreach (var n in names)
+                {
+                    var p = type.GetProperty(n, BindingFlags.Public | BindingFlags.Instance);
+                    if (p == null)
+                        continue;
+
+                    var v = p.GetValue(obj, null);
+                    if (v == null)
+                        continue;
+
+                    if (v is T)
+                        return (T)v;
+
+                    // handle numeric conversions
+                    try
+                    {
+                        return (T)Convert.ChangeType(v, typeof(T));
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            return default(T);
+        }
+
+        private void TrimClosedPnLs()
+        {
+            int maxKeep = Math.Max(KellyLookbackTrades * 3, 200);
+            if (_closedTradePnLs.Count > maxKeep)
+                _closedTradePnLs.RemoveRange(0, _closedTradePnLs.Count - maxKeep);
+        }
+        // --------------------------------------------------------------------
+
+        private bool IsBullishImpulse(int i)
+        {
+            return Bars.ClosePrices[i] > Bars.OpenPrices[i] &&
+                   (Bars.ClosePrices[i] - Bars.OpenPrices[i]) > atr.Result[i] * 0.4;
+        }
+
+        private bool IsBearishImpulse(int i)
+        {
+            return Bars.ClosePrices[i] < Bars.OpenPrices[i] &&
+                   (Bars.OpenPrices[i] - Bars.ClosePrices[i]) > atr.Result[i] * 0.4;
+        }
+
+        private bool IsLondonOrNY()
+        {
+            int h = Server.Time.Hour;
+            return h >= 7 && h <= 21;
+        }
+    }
+}

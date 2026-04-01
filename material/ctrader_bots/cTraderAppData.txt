@@ -1,0 +1,10 @@
+
+    Directory: C:\Users\DEV\AppData\Local\Spotware
+
+Mode       LastWriteTime
+----       -------------
+d----     02-02-2026
+                   02:25
+d----     02-02-2026
+                   02:25
+

@@ -1,0 +1,92 @@
+Based on the video, here is the detailed breakdown of the scalping strategy for use on 1-minute and 5-minute charts (0:00 - 0:12).I. The Fundamentals & Core Concept
+
+Market Assumption: The market is controlled by algorithms that build positions in specific zones rather than random movements (0:28 - 0:41).
+Institutional Behavior: Institutions break large orders into small pieces, creating tight consolidation zones (footprints) before major moves (0:52 - 1:04).
+Liquidity Sweeps: Algorithms target retail stop-losses to fuel their own trades, creating "mitigation zones" where price is guaranteed to return to balance books (1:51 - 2:31).II. Strategy Rules (3 Conditions)
+Find a Footprint Zone (Supply/Demand):
+Identify a tight consolidation area or a single candle that causes a break of structure (BOS) or change of character (CHOCH) (3:28 - 4:10).
+Mark the last candle in the opposite direction before the explosion (4:31 - 4:40).
+Crucial: Only trade fresh zones created within the last 2 to 4 hours (4:50 - 5:13).
+Add Pivot Point Confluence:
+The footprint zone should align with a mathematical pivot point level (S1/R1) for increased probability (6:08 - 6:55).
+Hunt Stop-Losses (Liquidity Sweep):
+Look for price to spike above/below an obvious level (resistance/support) to grab stop-losses before reversing back into the footprint zone (8:12 - 8:50).III. Entry Logic
+Buy Setup: Price must return to the demand zone, ideally after a liquidity sweep below the zone, and reverse upward (10:58 - 11:06).
+
+Sell Setup: Price must return to the supply zone, ideally after a liquidity sweep above the zone, and reverse downward (11:14 - 11:22).IV. Exit Logic & Risk Management
+
+Stop-Loss (SL): Placed slightly below the demand zone (for longs) or slightly above the supply zone (for shorts) (11:02 - 11:18).
+
+Take-Profit (TP): Target the next major supply/demand level, a recent swing high/low, or the opposing pivot point (11:05 - 11:22).
+
+Risk Management: Never risk more than 1% of the account balance on a single trade (15:20 - 15:30).V. Risk-to-Reward Ratio (RRR)
+
+The video does not specify a fixed numerical RRR, but emphasizes that by targeting major structural levels (swing highs/lows) and keeping stops tight to the zone, the strategy aims for a high probability, favorable risk-to-reward ratio for consistent small wins (12:52 - 13:00, 16:25 - 16:35).
+
+FOR AI:-
+
+INDICATOR LOGIC:-
+
+The provided video details a scalping strategy based on institutional footprints, pivot points, and liquidity sweeps, but it does not mention incorporating VWAP into the strategy logic. Therefore, I cannot provide a detailed, actionable logic for a trading indicator that includes VWAP based on this video (0:00 - 17:03).
+
+However, based on the video, here is the detailed strategy logic for creating an indicator based on Footprint Zones, Pivot Points, and Liquidity Sweeps:
+
+I. Strategy Components & Logical Rules
+1. Footprint Zone Detection (3:28 - 4:40)
+Logic: Scan for a tight consolidation area or a single candle that leads to a sudden, violent expansion of price.
+Condition: This expansion must cause a Break of Structure (BOS) or a Change of Character (CHOCH) (3:31).
+Zone Marking: Mark the last candle that moved in the opposite direction before the expansion begins (4:31).
+Expiration Rule: The indicator must only consider zones created within the last 2 to 4 hours (5:01).
+2. Pivot Point Confluence (6:13 - 6:55)
+Logic: Identify the nearest Daily Pivot Points (specifically S1 for buys, R1 for sells).
+Condition: The identified Footprint Zone must be located in close proximity to or directly aligned with a Pivot Point level.
+3. Liquidity Sweep Detection (8:12 - 9:08)
+Logic: Scan for price to spike beyond a technical level (previous high/low, support/resistance) where stop-losses are likely clustered.
+Condition: Price must immediately reverse back into the Footprint Zone after the sweep (8:43).
+II. Buy and Sell Signals
+Buy Signal (Long)
+Setup: Price approaches a fresh Demand Zone (Footprint) that aligns with an S1 Pivot Point (12:15).
+Trigger: Price executes a Liquidity Sweep below the zone and then closes back inside the zone (12:33).
+Action: Enter Long at the top of the Demand Zone (12:43).
+Sell Signal (Short)
+Setup: Price approaches a fresh Supply Zone (Footprint) that aligns with an R1 Pivot Point (13:29).
+Trigger: Price executes a Liquidity Sweep above the zone and then closes back inside the zone (13:41).
+Action: Enter Short at the bottom of the Supply Zone (13:56).
+III. Exit Logic & Risk Management (RRR)
+Stop-Loss: Place slightly below the Demand Zone (for buys) or slightly above the Supply Zone (for sells) (11:02).
+Take-Profit: Target the next major supply/demand level, a recent swing high/low, or the opposing Pivot Point (11:05).
+Risk Management: Do not risk more than 1% of account balance per trade (15:20).
+
+
+FOR EA
+
+
+The provided video details a scalping strategy based on institutional footprints, pivot points, and liquidity sweeps, but it does not mention incorporating VWAP into the strategy logic. Therefore, I cannot provide a detailed, actionable logic for a trading indicator that includes VWAP based on this video (0:00 - 17:03).
+
+However, based on the video, here is the detailed strategy logic for creating an indicator based on Footprint Zones, Pivot Points, and Liquidity Sweeps:
+
+I. Strategy Components & Logical Rules
+1. Footprint Zone Detection (3:28 - 4:40)
+Logic: Scan for a tight consolidation area or a single candle that leads to a sudden, violent expansion of price.
+Condition: This expansion must cause a Break of Structure (BOS) or a Change of Character (CHOCH) (3:31).
+Zone Marking: Mark the last candle that moved in the opposite direction before the expansion begins (4:31).
+Expiration Rule: The indicator must only consider zones created within the last 2 to 4 hours (5:01).
+2. Pivot Point Confluence (6:13 - 6:55)
+Logic: Identify the nearest Daily Pivot Points (specifically S1 for buys, R1 for sells).
+Condition: The identified Footprint Zone must be located in close proximity to or directly aligned with a Pivot Point level.
+3. Liquidity Sweep Detection (8:12 - 9:08)
+Logic: Scan for price to spike beyond a technical level (previous high/low, support/resistance) where stop-losses are likely clustered.
+Condition: Price must immediately reverse back into the Footprint Zone after the sweep (8:43).
+II. Buy and Sell Signals
+Buy Signal (Long)
+Setup: Price approaches a fresh Demand Zone (Footprint) that aligns with an S1 Pivot Point (12:15).
+Trigger: Price executes a Liquidity Sweep below the zone and then closes back inside the zone (12:33).
+Action: Enter Long at the top of the Demand Zone (12:43).
+Sell Signal (Short)
+Setup: Price approaches a fresh Supply Zone (Footprint) that aligns with an R1 Pivot Point (13:29).
+Trigger: Price executes a Liquidity Sweep above the zone and then closes back inside the zone (13:41).
+Action: Enter Short at the bottom of the Supply Zone (13:56).
+III. Exit Logic & Risk Management (RRR)
+Stop-Loss: Place slightly below the Demand Zone (for buys) or slightly above the Supply Zone (for sells) (11:02).
+Take-Profit: Target the next major supply/demand level, a recent swing high/low, or the opposing Pivot Point (11:05).
+Risk Management: Do not risk more than 1% of account balance per trade (15:20).

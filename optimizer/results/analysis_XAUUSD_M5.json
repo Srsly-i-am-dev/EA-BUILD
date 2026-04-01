@@ -1,0 +1,15 @@
+{
+  "symbol": "XAUUSD",
+  "timeframe": "M5",
+  "current_price": 4750.9,
+  "atr_14": 6.8843,
+  "atr_50": 6.803,
+  "std_dev_20": 10.6562,
+  "vol_ratio": 0.86,
+  "avg_spread": 15.0,
+  "avg_volume": 2726.0,
+  "sma50": 4730.9146,
+  "trend": "BULLISH",
+  "volatility": "NORMAL",
+  "bars_analyzed": 500
+}

@@ -1,0 +1,223 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ionfresher
+
+//@version=6
+import Trendoscope/ZigzagLite/3 as zg
+import Trendoscope/FibRatios/1 as fibs
+
+indicator('ABC Pro Ultimate + S/R Prices', 'ABC-ULTI', overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 5000)
+
+// --- 1. EINSTELLUNGEN ---
+zigzagLength = input.int(10, 'Zigzag Sensivität', minval = 2, group = 'ABC Setup')
+minRet       = input.float(0.236, 'Min. Korrektur (BC)', step = 0.05, group = 'ABC Setup')
+maxRet       = input.float(0.886, 'Max. Korrektur (BC)', step = 0.05, group = 'ABC Setup')
+maxPatterns  = input.int(3, 'Max. Anzahl Muster', minval = 1, group = 'ABC Setup')
+
+grp_vis      = 'Optik: ABC Struktur'
+abcColor     = input.color(color.gray, 'ABC Linien Farbe', group = grp_vis)
+abcWidth     = input.int(2, 'ABC Linien Dicke', minval = 1, maxval = 4, group = grp_vis)
+abcLabelSize = input.string("Normal", "Buchstaben Größe", options=["Klein", "Normal", "Groß"], group = grp_vis)
+
+grp_sr       = 'Power S/R'
+showSR       = input.bool(true, 'Historische S/R anzeigen', group = grp_sr)
+srSource     = input.string("Dochte", "S/R Basis", options=["Dochte", "Körper"], group=grp_sr)
+srStrength   = input.int(10, 'S/R Relevanz (Stärke)', minval = 2, group = grp_sr)
+numSup       = input.int(3, 'Support Linien', minval = 0, group = grp_sr)
+numRes       = input.int(3, 'Resistance Linien', minval = 0, group = grp_sr)
+showSRPrices = input.bool(true, 'Preise an S/R anzeigen', group = grp_sr) // NEU
+
+grp_tl       = 'Power Trendlines'
+showMinorTL  = input.bool(true, 'Minor Trendlinien (Dashed)', group = grp_tl)
+minorLen     = input.int(20, 'Minor Pivot-Länge', minval = 2, group = grp_tl)
+showMajorTL  = input.bool(true, 'Major Trendlinien (Solid)', group = grp_tl)
+majorLen     = input.int(60, 'Major Pivot-Länge', minval = 5, group = grp_tl)
+colorTL      = input.color(color.new(color.gray, 40), 'Trendlinien Farbe', group = grp_tl)
+
+colorSup     = input.color(color.new(color.teal, 30), 'Support Farbe', group = grp_sr)
+colorRes     = input.color(color.new(color.red, 30), 'Resistance Farbe', group = grp_sr)
+colorLong    = color.new(color.green, 90)
+colorShort   = color.new(color.red, 90)
+
+f_getSize(s) =>
+    s == "Klein" ? size.small : s == "Groß" ? size.large : size.normal
+
+// --- 2. PIVOT BERECHNUNG ---
+srcHigh = srSource == "Dochte" ? high : math.max(open, close)
+srcLow  = srSource == "Dochte" ? low  : math.min(open, close)
+
+phSR = ta.pivothigh(srcHigh, srStrength, srStrength)
+plSR = ta.pivotlow(srcLow, srStrength, srStrength)
+phMinor = ta.pivothigh(srcHigh, minorLen, minorLen)
+plMinor = ta.pivotlow(srcLow, minorLen, minorLen)
+phMajor = ta.pivothigh(srcHigh, majorLen, majorLen)
+plMajor = ta.pivotlow(srcLow, majorLen, majorLen)
+
+// --- 3. TYPES ---
+type ABCDrawing
+    line ab
+    line bc
+    label aL
+    label bL
+    label cL
+    box t1B
+    box t2B
+    box t3B
+    label p1
+    label p2
+    label p3
+    float target1
+    float invalidLevel
+    bool isBullish
+    int bIdx
+    int cIdx
+
+method delete(ABCDrawing this) =>
+    if not na(this)
+        line.delete(this.ab), line.delete(this.bc)
+        label.delete(this.aL), label.delete(this.bL), label.delete(this.cL)
+        box.delete(this.t1B), box.delete(this.t2B), box.delete(this.t3B)
+        label.delete(this.p1), label.delete(this.p2), label.delete(this.p3)
+
+// --- 4. ABC LOGIK ---
+var zigzag = zg.Zigzag.new(zigzagLength, 2000)
+zigzag.calculate(array.from(high, low))
+var patternHistory = array.new<ABCDrawing>()
+
+if zigzag.zigzagPivots.size() >= 4
+    cz = zigzag.zigzagPivots.get(0)
+    bz = zigzag.zigzagPivots.get(1)
+    az = zigzag.zigzagPivots.get(2)
+    
+    if cz.ratio >= minRet and cz.ratio <= maxRet
+        bool shouldDraw = false
+        if patternHistory.size() > 0
+            ABCDrawing lastP = patternHistory.get(0)
+            if lastP.bIdx == bz.point.index
+                if lastP.cIdx != cz.point.index
+                    lastP.delete()
+                    patternHistory.remove(0)
+                    shouldDraw := true
+            else
+                shouldDraw := true
+        else
+            shouldDraw := true
+
+        if shouldDraw
+            t1P = fibs.extension(az.point.price, bz.point.price, cz.point.price, 1.618, false)
+            t2P = fibs.extension(az.point.price, bz.point.price, cz.point.price, 1.809, false)
+            t3P = fibs.extension(az.point.price, bz.point.price, cz.point.price, 2.0, false)
+            abRange = math.abs(az.point.price - bz.point.price)
+            isBull = bz.point.price > az.point.price
+            invLvl = isBull ? bz.point.price - (abRange * 0.886) : bz.point.price + (abRange * 0.886)
+            cBoxCol = isBull ? colorLong : colorShort
+
+            l_ab = line.new(az.point.index, az.point.price, bz.point.index, bz.point.price, color=abcColor, width=abcWidth)
+            l_bc = line.new(bz.point.index, bz.point.price, cz.point.index, cz.point.price, color=abcColor, width=abcWidth)
+            
+            lSiz = f_getSize(abcLabelSize)
+            styleA = az.point.price > bz.point.price ? label.style_label_down : label.style_label_up
+            styleB = bz.point.price > az.point.price ? label.style_label_down : label.style_label_up
+            styleC = cz.point.price > bz.point.price ? label.style_label_down : label.style_label_up
+            
+            lbl_a = label.new(az.point.index, az.point.price, "A", style=styleA, color=color.new(abcColor, 100), textcolor=abcColor, size=lSiz)
+            lbl_b = label.new(bz.point.index, bz.point.price, "B", style=styleB, color=color.new(abcColor, 100), textcolor=abcColor, size=lSiz)
+            lbl_c = label.new(cz.point.index, cz.point.price, "C", style=styleC, color=color.new(abcColor, 100), textcolor=abcColor, size=lSiz)
+            
+            eIdx = bar_index + 25
+            b_t1 = box.new(cz.point.index, cz.point.price, eIdx, t1P, border_color=abcColor, bgcolor=cBoxCol)
+            b_t2 = box.new(cz.point.index, t1P, eIdx, t2P, border_color=abcColor, bgcolor=cBoxCol)
+            b_t3 = box.new(cz.point.index, t2P, eIdx, t3P, border_color=abcColor, bgcolor=cBoxCol)
+            
+            lp1 = label.new(eIdx, t1P, str.format("{0,number,#.#####}", t1P), style=label.style_label_left, color=#00000000, textcolor=abcColor, size=size.small)
+            lp2 = label.new(eIdx, t2P, str.format("{0,number,#.#####}", t2P), style=label.style_label_left, color=#00000000, textcolor=abcColor, size=size.small)
+            lp3 = label.new(eIdx, t3P, str.format("{0,number,#.#####}", t3P), style=label.style_label_left, color=#00000000, textcolor=abcColor, size=size.small)
+            
+            patternHistory.unshift(ABCDrawing.new(l_ab, l_bc, lbl_a, lbl_b, lbl_c, b_t1, b_t2, b_t3, lp1, lp2, lp3, t1P, invLvl, isBull, bz.point.index, cz.point.index))
+            if patternHistory.size() > maxPatterns
+                patternHistory.pop().delete()
+
+// --- 5. CLEANUP ABC ---
+if patternHistory.size() > 0
+    for i = patternHistory.size() - 1 to 0
+        ABCDrawing p = patternHistory.get(i)
+        if not na(p)
+            targetMet = (p.isBullish and high >= p.target1) or (not p.isBullish and low <= p.target1)
+            invalidated = (p.isBullish and low < p.invalidLevel) or (not p.isBullish and high > p.invalidLevel)
+            if targetMet or invalidated
+                p.delete()
+                patternHistory.remove(i)
+
+// --- 6. S/R & TRENDLINIEN ---
+var line[] srLines = array.new_line()
+var label[] srLabels = array.new_label() // NEU für Preise
+var line miRes = na, var line miSup = na, var line maRes = na, var line maSup = na
+
+if barstate.islast
+    for l in srLines
+        line.delete(l)
+    srLines.clear()
+    for lb in srLabels
+        label.delete(lb)
+    srLabels.clear()
+    line.delete(miRes), line.delete(miSup), line.delete(maRes), line.delete(maSup)
+    
+    if showSR
+        int rC = 0, int sC = 0
+        for i = 0 to 2000
+            if not na(phSR[i]) and phSR[i] > close and rC < numRes
+                l = line.new(bar_index[i + srStrength], phSR[i], bar_index, phSR[i], color=colorRes, width=2)
+                srLines.push(l)
+                if showSRPrices
+                    srLabels.push(label.new(bar_index, phSR[i], str.tostring(phSR[i], "#.#####"), style=label.style_label_left, color=#00000000, textcolor=colorRes, size=size.small))
+                rC := rC + 1
+            if not na(plSR[i]) and plSR[i] < close and sC < numSup
+                l = line.new(bar_index[i + srStrength], plSR[i], bar_index, plSR[i], color=colorSup, width=2)
+                srLines.push(l)
+                if showSRPrices
+                    srLabels.push(label.new(bar_index, plSR[i], str.tostring(plSR[i], "#.#####"), style=label.style_label_left, color=#00000000, textcolor=colorSup, size=size.small))
+                sC := sC + 1
+
+    // Trendlinien Logik (identisch zu V71)
+    if showMinorTL
+        int p1m = na, int p2m = na
+        for i = 0 to 2000
+            if not na(phMinor[i])
+                if na(p1m)
+                    p1m := i + minorLen
+                else
+                    p2m := i + minorLen
+                    break
+        if not na(p1m) and not na(p2m)
+            miRes := line.new(bar_index[p2m], srcHigh[p2m], bar_index[p1m], srcHigh[p1m], extend=extend.right, color=colorTL, style=line.style_dashed, width=1)
+        int p1ml = na, int p2ml = na
+        for i = 0 to 2000
+            if not na(plMinor[i])
+                if na(p1ml)
+                    p1ml := i + minorLen
+                else
+                    p2ml := i + minorLen
+                    break
+        if not na(p1ml) and not na(p2ml)
+            miSup := line.new(bar_index[p2ml], srcLow[p2ml], bar_index[p1ml], srcLow[p1ml], extend=extend.right, color=colorTL, style=line.style_dashed, width=1)
+
+    if showMajorTL
+        int p1M = na, int p2M = na
+        for i = 0 to 2000
+            if not na(phMajor[i])
+                if na(p1M)
+                    p1M := i + majorLen
+                else
+                    p2M := i + majorLen
+                    break
+        if not na(p1M) and not na(p2M)
+            maRes := line.new(bar_index[p2M], srcHigh[p2M], bar_index[p1M], srcHigh[p1M], extend=extend.right, color=colorTL, style=line.style_solid, width=2)
+        int p1Ml = na, int p2Ml = na
+        for i = 0 to 2000
+            if not na(plMajor[i])
+                if na(p1Ml)
+                    p1Ml := i + majorLen
+                else
+                    p2Ml := i + majorLen
+                    break
+        if not na(p1Ml) and not na(p2Ml)
+            maSup := line.new(bar_index[p2Ml], srcLow[p2Ml], bar_index[p1Ml], srcLow[p1Ml], extend=extend.right, color=colorTL, style=line.style_solid, width=2)

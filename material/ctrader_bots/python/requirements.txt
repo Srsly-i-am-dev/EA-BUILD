@@ -1,0 +1,9 @@
+# cTrader Python cBot dependencies
+# Place this file in the same folder as your .py cBot files.
+# cTrader 5.4+ reads this file and installs packages automatically on first run.
+#
+# Required for ML signal filtering (used by smp1_update_cool.py UseMlFilter=True):
+xgboost>=2.0
+scikit-learn>=1.4
+joblib>=1.3
+numpy>=1.26

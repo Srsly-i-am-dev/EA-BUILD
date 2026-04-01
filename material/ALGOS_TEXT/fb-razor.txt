@@ -1,0 +1,970 @@
+using System;
+using System.Collections.Generic;
+using cAlgo.API;
+using cAlgo.API.Indicators;
+
+namespace cAlgo.Robots
+{
+    [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
+    public class FibEmaRazorSwing : Robot
+    {
+        // =========================
+        // ====== PARAMETERS =======
+        // =========================
+
+        [Parameter("Fast EMA Period", DefaultValue = 21, MinValue = 1)]
+        public int FastEmaPeriod { get; set; }
+
+        [Parameter("Slow EMA Period", DefaultValue = 55, MinValue = 2)]
+        public int SlowEmaPeriod { get; set; }
+
+        [Parameter("Trend Slope Lookback", DefaultValue = 10, MinValue = 1)]
+        public int TrendSlopeLookback { get; set; }
+
+        [Parameter("Min EMA Slope (pips)", DefaultValue = 0.6, MinValue = 0)]
+        public double MinEmaSlopePips { get; set; }
+
+        // Swing / Pivot
+        [Parameter("Swing Pivot Left", DefaultValue = 3, MinValue = 1)]
+        public int SwingPivotLeft { get; set; }
+
+        [Parameter("Swing Pivot Right", DefaultValue = 3, MinValue = 1)]
+        public int SwingPivotRight { get; set; }
+
+        [Parameter("Min Impulse (pips)", DefaultValue = 80, MinValue = 0)]
+        public double MinImpulsePips { get; set; }
+
+        [Parameter("Min Impulse (ATR mult)", DefaultValue = 2.0, MinValue = 0)]
+        public double MinImpulseAtrMult { get; set; }
+
+        [Parameter("Max Bars For Impulse", DefaultValue = 80, MinValue = 5)]
+        public int MaxBarsForImpulse { get; set; }
+
+        [Parameter("Max Counter Closes (Impulse)", DefaultValue = 20, MinValue = 0)]
+        public int MaxCounterClosesImpulse { get; set; }
+
+        // EQH/EQL module
+        [Parameter("Enable EQH/EQL Detection", DefaultValue = true)]
+        public bool EnableEQHLDetection { get; set; }
+
+        [Parameter("EQ Tolerance (pips)", DefaultValue = 8, MinValue = 0)]
+        public double EqTolerancePips { get; set; }
+
+        [Parameter("EQ Lookback Bars", DefaultValue = 200, MinValue = 20)]
+        public int EqLookbackBars { get; set; }
+
+        [Parameter("Require Liquidity Sweep", DefaultValue = true)]
+        public bool RequireLiquiditySweep { get; set; }
+
+        [Parameter("Sweep Break (pips)", DefaultValue = 8, MinValue = 0)]
+        public double SweepBreakPips { get; set; }
+
+        [Parameter("Sweep Reclaim Bars", DefaultValue = 15, MinValue = 1)]
+        public int SweepReclaimBars { get; set; }
+
+        // Fibonacci / setup
+        [Parameter("Fib Zone Min", DefaultValue = 0.382, MinValue = 0.0, MaxValue = 1.0)]
+        public double FibZoneMin { get; set; }
+
+        [Parameter("Fib Zone Max", DefaultValue = 0.618, MinValue = 0.0, MaxValue = 1.0)]
+        public double FibZoneMax { get; set; }
+
+        [Parameter("Invalidation Level", DefaultValue = 0.786, MinValue = 0.0, MaxValue = 1.0)]
+        public double InvalidationLevel { get; set; }
+
+        [Parameter("Invalidation Buffer (pips)", DefaultValue = 6, MinValue = 0)]
+        public double InvalidationBufferPips { get; set; }
+
+        [Parameter("Max Retrace Bars", DefaultValue = 60, MinValue = 5)]
+        public int MaxRetraceBars { get; set; }
+
+        [Parameter("Retrace Touch Uses Wick", DefaultValue = true)]
+        public bool RetraceTouchUsesWick { get; set; }
+
+        [Parameter("Max Closes Beyond FastEMA (Retrace)", DefaultValue = 12, MinValue = 0)]
+        public int MaxClosesBeyondFastEmaDuringRetrace { get; set; }
+
+        // Entry trigger (structure break)
+        [Parameter("Entry Pivot Left", DefaultValue = 2, MinValue = 1)]
+        public int EntryPivotLeft { get; set; }
+
+        [Parameter("Entry Pivot Right", DefaultValue = 2, MinValue = 1)]
+        public int EntryPivotRight { get; set; }
+
+        [Parameter("Entry Buffer (pips)", DefaultValue = 2, MinValue = 0)]
+        public double EntryBufferPips { get; set; }
+
+        [Parameter("Max Entry Distance (pips)", DefaultValue = 40, MinValue = 0)]
+        public double MaxEntryDistancePips { get; set; }
+
+        // SL/TP
+        [Parameter("SL Buffer (pips)", DefaultValue = 4, MinValue = 0)]
+        public double SLBufferPips { get; set; }
+
+        [Parameter("SL ATR Mult", DefaultValue = 1.5, MinValue = 0)]
+        public double SL_ATR_Mult { get; set; }
+
+        [Parameter("Fib Target Extension", DefaultValue = 1.272, MinValue = 1.0)]
+        public double FibTargetExtension { get; set; }
+
+        [Parameter("TP ATR Mult", DefaultValue = 2.2, MinValue = 0)]
+        public double TP_ATR_Mult { get; set; }
+
+        // Partials / BE
+        [Parameter("Enable Partials", DefaultValue = true)]
+        public bool EnablePartials { get; set; }
+
+        [Parameter("Partial Close %", DefaultValue = 50, MinValue = 1, MaxValue = 99)]
+        public int PartialClosePercent { get; set; }
+
+        [Parameter("Partial At R", DefaultValue = 1.0, MinValue = 0.1)]
+        public double PartialAtR { get; set; }
+
+        [Parameter("Enable BreakEven", DefaultValue = true)]
+        public bool EnableBreakEven { get; set; }
+
+        [Parameter("BreakEven At R", DefaultValue = 1.2, MinValue = 0.1)]
+        public double BreakEvenAtR { get; set; }
+
+        [Parameter("BreakEven +pips", DefaultValue = 1, MinValue = 0)]
+        public double BreakEvenPlusPips { get; set; }
+
+        // Volatility regime
+        [Parameter("Vol ATR Period", DefaultValue = 14, MinValue = 2)]
+        public int VolAtrPeriod { get; set; }
+
+        [Parameter("Vol ATR MA Period", DefaultValue = 50, MinValue = 5)]
+        public int VolMaPeriod { get; set; }
+
+        [Parameter("LowVol Threshold", DefaultValue = 0.85, MinValue = 0.1)]
+        public double LowVolThreshold { get; set; }
+
+        [Parameter("HighVol Threshold", DefaultValue = 1.2, MinValue = 0.1)]
+        public double HighVolThreshold { get; set; }
+
+        [Parameter("LowVol SL Mult", DefaultValue = 0.9, MinValue = 0.1)]
+        public double LowVol_SLMulti { get; set; }
+
+        [Parameter("LowVol TP Mult", DefaultValue = 0.95, MinValue = 0.1)]
+        public double LowVol_TPMulti { get; set; }
+
+        [Parameter("NormalVol SL Mult", DefaultValue = 1.0, MinValue = 0.1)]
+        public double NormalVol_SLMulti { get; set; }
+
+        [Parameter("NormalVol TP Mult", DefaultValue = 1.0, MinValue = 0.1)]
+        public double NormalVol_TPMulti { get; set; }
+
+        [Parameter("HighVol SL Mult", DefaultValue = 1.25, MinValue = 0.1)]
+        public double HighVol_SLMulti { get; set; }
+
+        [Parameter("HighVol TP Mult", DefaultValue = 1.4, MinValue = 0.1)]
+        public double HighVol_TPMulti { get; set; }
+
+        // Risk controls
+        [Parameter("Risk Per Trade %", DefaultValue = 1.0, MinValue = 0.01)]
+        public double RiskPerTradePercent { get; set; }
+
+        [Parameter("Max Daily Loss %", DefaultValue = 4.0, MinValue = 0.1)]
+        public double MaxDailyLossPercent { get; set; }
+
+        [Parameter("Max Consecutive Losses", DefaultValue = 4, MinValue = 1)]
+        public int MaxConsecutiveLosses { get; set; }
+
+        [Parameter("Max Open Positions", DefaultValue = 1, MinValue = 1)]
+        public int MaxOpenPositions { get; set; }
+
+        [Parameter("Cooldown Bars After Close", DefaultValue = 10, MinValue = 0)]
+        public int CooldownBarsAfterClose { get; set; }
+
+        [Parameter("Cooldown Bars After Loss", DefaultValue = 20, MinValue = 0)]
+        public int CooldownBarsAfterLoss { get; set; }
+
+        // Hedging
+        [Parameter("Enable Hedging", DefaultValue = true)]
+        public bool EnableHedging { get; set; }
+
+        [Parameter("Hedge Trigger ATR", DefaultValue = 1.2, MinValue = 0.1)]
+        public double HedgeTriggerATR { get; set; }
+
+        [Parameter("Hedge Size % of Main", DefaultValue = 50, MinValue = 1, MaxValue = 200)]
+        public int HedgeSizePercent { get; set; }
+
+        [Parameter("Hedge SL ATR", DefaultValue = 1.5, MinValue = 0.1)]
+        public double HedgeSL_ATR { get; set; }
+
+        [Parameter("Hedge TP ATR", DefaultValue = 1.8, MinValue = 0.1)]
+        public double HedgeTP_ATR { get; set; }
+
+        [Parameter("Hedge Max Bars Open", DefaultValue = 50, MinValue = 1)]
+        public int HedgeMaxBarsOpen { get; set; }
+
+        [Parameter("Max Hedges Per Trade", DefaultValue = 1, MinValue = 0)]
+        public int MaxHedgesPerTrade { get; set; }
+
+        // Operational
+        [Parameter("Max Spread (pips)", DefaultValue = 3.0, MinValue = 0)]
+        public double MaxSpreadPips { get; set; }
+
+        // =========================
+        // ====== INDICATORS =======
+        // =========================
+        private ExponentialMovingAverage _emaFast;
+        private ExponentialMovingAverage _emaSlow;
+        private AverageTrueRange _atr;
+        private AverageTrueRange _volAtr;
+        private SimpleMovingAverage _volAtrSma;
+
+        // =========================
+        // ====== STATE ============
+        // =========================
+        private enum BotState { Idle, ImpulseFound, Retracing, Armed, InTrade, Cooldown, Halted }
+        private BotState _state = BotState.Idle;
+
+        private const string LabelMain = "FIBRAZOR_MAIN";
+        private const string LabelHedge = "FIBRAZOR_HEDGE";
+
+        // daily tracking
+        private DateTime _dayKey;
+        private double _dayStartEquity;
+        private int _consecutiveLosses;
+
+        // cooldown
+        private int _cooldownUntilBarIndex = -1;
+
+        // setup data
+        private int _impulseStartIndex = -1;
+        private int _impulseEndIndex = -1;
+        private double _swingStartPrice;
+        private double _swingEndPrice;
+        private TradeType _setupDirection;
+
+        private int _retraceTouchIndex = -1;
+        private double _entryBreakLevel = double.NaN;
+
+        // management flags
+        private bool _partialDone;
+        private bool _beDone;
+        private int _hedgeOpenedAtBarIndex = -1;
+
+        protected override void OnStart()
+        {
+            _emaFast = Indicators.ExponentialMovingAverage(Bars.ClosePrices, FastEmaPeriod);
+            _emaSlow = Indicators.ExponentialMovingAverage(Bars.ClosePrices, SlowEmaPeriod);
+
+            _atr = Indicators.AverageTrueRange(14, MovingAverageType.Simple);
+            _volAtr = Indicators.AverageTrueRange(VolAtrPeriod, MovingAverageType.Simple);
+            _volAtrSma = Indicators.SimpleMovingAverage(_volAtr.Result, VolMaPeriod);
+
+            _dayKey = Server.Time.Date;
+            _dayStartEquity = Account.Equity;
+            _consecutiveLosses = 0;
+
+            // ✅ FIX for CS0115: subscribe to event (no override exists)
+            Positions.Closed += OnPositionsClosed;
+
+            Print("Started Fib–EMA Razor Swing on {0} TF={1}", SymbolName, TimeFrame);
+        }
+
+        protected override void OnBar()
+        {
+            int i = Bars.Count - 2; // last CLOSED bar
+            if (i < Math.Max(SlowEmaPeriod + TrendSlopeLookback + 5, 300))
+                return;
+
+            // day reset
+            if (Server.Time.Date != _dayKey)
+            {
+                _dayKey = Server.Time.Date;
+                _dayStartEquity = Account.Equity;
+                _consecutiveLosses = 0;
+                Print("[DAY] Reset. StartEquity={0:F2}", _dayStartEquity);
+            }
+
+            // spread filter
+            double spreadPips = Symbol.Spread / Symbol.PipSize;
+            if (spreadPips > MaxSpreadPips)
+                return;
+
+            // risk gates
+            if (IsDailyLossLimitHit() || _consecutiveLosses >= MaxConsecutiveLosses)
+                return;
+
+            // cooldown
+            if (_cooldownUntilBarIndex >= 0 && i <= _cooldownUntilBarIndex)
+            {
+                _state = BotState.Cooldown;
+                return;
+            }
+            if (_state == BotState.Cooldown)
+                _state = BotState.Idle;
+
+            // manage open trades
+            ManageOpenPositions(i);
+
+            // don’t search new setup if already have a main position
+            if (CountOpenMainPositions() >= MaxOpenPositions)
+            {
+                _state = BotState.InTrade;
+                return;
+            }
+
+            // trend
+            if (!TryGetTrend(i, out var trendDir))
+            {
+                _state = BotState.Idle;
+                return;
+            }
+
+            // state machine
+            if (_state == BotState.Idle)
+                TryFindImpulse(i, trendDir);
+            else if (_state == BotState.ImpulseFound || _state == BotState.Retracing)
+                TryTrackRetracementAndArm(i);
+            else if (_state == BotState.Armed)
+                TryEntry(i);
+        }
+
+        // =========================
+        // Trend filter
+        // =========================
+        private bool TryGetTrend(int i, out TradeType dir)
+        {
+            dir = TradeType.Buy;
+            double fast = _emaFast.Result[i];
+            double slow = _emaSlow.Result[i];
+            double slopePips = (fast - _emaFast.Result[i - TrendSlopeLookback]) / Symbol.PipSize;
+
+            bool bull = fast > slow && slopePips >= MinEmaSlopePips;
+            bool bear = fast < slow && slopePips <= -MinEmaSlopePips;
+
+            if (bull) { dir = TradeType.Buy; return true; }
+            if (bear) { dir = TradeType.Sell; return true; }
+            return false;
+        }
+
+        // =========================
+        // Pivot / Impulse
+        // =========================
+        private void TryFindImpulse(int i, TradeType trendDir)
+        {
+            if (!TryGetLatestImpulsePivots(i, trendDir, out int startIdx, out double startPrice, out int endIdx, out double endPrice))
+                return;
+
+            int span = endIdx - startIdx;
+            if (span <= 0 || span > MaxBarsForImpulse)
+                return;
+
+            double impulsePips = Math.Abs(endPrice - startPrice) / Symbol.PipSize;
+            double minByAtrPips = (_atr.Result[endIdx] * MinImpulseAtrMult) / Symbol.PipSize;
+            if (impulsePips < Math.Max(MinImpulsePips, minByAtrPips))
+                return;
+
+            // counter closes
+            int counter = 0;
+            for (int k = startIdx + 1; k <= endIdx; k++)
+            {
+                double c = Bars.ClosePrices[k];
+                double prev = Bars.ClosePrices[k - 1];
+                if (trendDir == TradeType.Buy)
+                {
+                    if (c < prev) counter++;
+                }
+                else
+                {
+                    if (c > prev) counter++;
+                }
+            }
+            if (counter > MaxCounterClosesImpulse)
+                return;
+
+            // EQ module (FIX: if no EQ found -> do not reject)
+            if (EnableEQHLDetection)
+            {
+                if (!ValidateImpulseByEqModule(trendDir, startIdx))
+                {
+                    Print("[SKIP] Impulse rejected by EQ module ({0}).", trendDir == TradeType.Buy ? "BULL" : "BEAR");
+                    return;
+                }
+            }
+
+            _impulseStartIndex = startIdx;
+            _impulseEndIndex = endIdx;
+            _swingStartPrice = startPrice;
+            _swingEndPrice = endPrice;
+            _setupDirection = trendDir;
+
+            _retraceTouchIndex = -1;
+            _entryBreakLevel = double.NaN;
+            _state = BotState.ImpulseFound;
+        }
+
+        private bool TryGetLatestImpulsePivots(int i, TradeType dir,
+            out int startIdx, out double startPrice,
+            out int endIdx, out double endPrice)
+        {
+            startIdx = endIdx = -1;
+            startPrice = endPrice = double.NaN;
+
+            var highs = new List<int>();
+            var lows = new List<int>();
+
+            int scanFrom = i - 1;
+            int scanTo = Math.Max(0, i - (MaxBarsForImpulse + 150));
+
+            for (int k = scanFrom; k >= scanTo; k--)
+            {
+                if (IsPivotHigh(k, SwingPivotLeft, SwingPivotRight))
+                    highs.Add(k);
+                if (IsPivotLow(k, SwingPivotLeft, SwingPivotRight))
+                    lows.Add(k);
+            }
+
+            if (dir == TradeType.Buy)
+            {
+                if (highs.Count == 0 || lows.Count == 0) return false;
+
+                int h = MaxIndex(highs);
+                int l = MaxIndexLessThan(lows, h);
+                if (l < 0) return false;
+
+                startIdx = l; startPrice = Bars.LowPrices[l];
+                endIdx = h; endPrice = Bars.HighPrices[h];
+                return true;
+            }
+            else
+            {
+                if (highs.Count == 0 || lows.Count == 0) return false;
+
+                int l = MaxIndex(lows);
+                int h = MaxIndexLessThan(highs, l);
+                if (h < 0) return false;
+
+                startIdx = h; startPrice = Bars.HighPrices[h];
+                endIdx = l; endPrice = Bars.LowPrices[l];
+                return true;
+            }
+        }
+
+        private int MaxIndex(List<int> list)
+        {
+            int m = -1;
+            for (int i = 0; i < list.Count; i++)
+                if (list[i] > m) m = list[i];
+            return m;
+        }
+
+        private int MaxIndexLessThan(List<int> list, int limitExclusive)
+        {
+            int m = -1;
+            for (int i = 0; i < list.Count; i++)
+                if (list[i] < limitExclusive && list[i] > m) m = list[i];
+            return m;
+        }
+
+        private bool IsPivotHigh(int idx, int left, int right)
+        {
+            if (idx - left < 0 || idx + right >= Bars.Count) return false;
+
+            double h = Bars.HighPrices[idx];
+            for (int k = idx - left; k <= idx + right; k++)
+            {
+                if (k == idx) continue;
+                if (Bars.HighPrices[k] >= h) return false;
+            }
+            return true;
+        }
+
+        private bool IsPivotLow(int idx, int left, int right)
+        {
+            if (idx - left < 0 || idx + right >= Bars.Count) return false;
+
+            double l = Bars.LowPrices[idx];
+            for (int k = idx - left; k <= idx + right; k++)
+            {
+                if (k == idx) continue;
+                if (Bars.LowPrices[k] <= l) return false;
+            }
+            return true;
+        }
+
+        // =========================
+        // EQ module (FIXED behavior)
+        // =========================
+        private bool ValidateImpulseByEqModule(TradeType dir, int impulseStartIdx)
+        {
+            int start = Math.Max(0, impulseStartIdx - EqLookbackBars);
+            int end = impulseStartIdx - 1;
+            if (end <= start + 20) return true;
+
+            double tol = EqTolerancePips * Symbol.PipSize;
+            double sweepBreak = SweepBreakPips * Symbol.PipSize;
+
+            if (dir == TradeType.Buy)
+            {
+                if (!TryFindEqualLow(start, end, tol, out double eqLevel, out int eqSecondIdx))
+                    return true; // ✅ no EQ found => do not block
+
+                if (!RequireLiquiditySweep) return true;
+
+                int sweepIdx = -1;
+                for (int k = eqSecondIdx + 1; k <= end; k++)
+                {
+                    if (Bars.LowPrices[k] <= eqLevel - sweepBreak) { sweepIdx = k; break; }
+                }
+                if (sweepIdx < 0) return false;
+
+                int reclaimEnd = Math.Min(end, sweepIdx + SweepReclaimBars);
+                for (int k = sweepIdx + 1; k <= reclaimEnd; k++)
+                    if (Bars.ClosePrices[k] > eqLevel) return true;
+
+                return false;
+            }
+            else
+            {
+                if (!TryFindEqualHigh(start, end, tol, out double eqLevel, out int eqSecondIdx))
+                    return true; // ✅ no EQ found => do not block
+
+                if (!RequireLiquiditySweep) return true;
+
+                int sweepIdx = -1;
+                for (int k = eqSecondIdx + 1; k <= end; k++)
+                {
+                    if (Bars.HighPrices[k] >= eqLevel + sweepBreak) { sweepIdx = k; break; }
+                }
+                if (sweepIdx < 0) return false;
+
+                int reclaimEnd = Math.Min(end, sweepIdx + SweepReclaimBars);
+                for (int k = sweepIdx + 1; k <= reclaimEnd; k++)
+                    if (Bars.ClosePrices[k] < eqLevel) return true;
+
+                return false;
+            }
+        }
+
+        private bool TryFindEqualLow(int start, int end, double tol, out double eqLevel, out int eqSecondIdx)
+        {
+            eqLevel = double.NaN;
+            eqSecondIdx = -1;
+
+            var lows = new List<int>();
+            for (int k = end; k >= start; k--)
+                if (IsPivotLow(k, SwingPivotLeft, SwingPivotRight)) lows.Add(k);
+
+            if (lows.Count < 2) return false;
+
+            for (int a = 0; a < lows.Count; a++)
+            {
+                for (int b = a + 1; b < lows.Count; b++)
+                {
+                    double p1 = Bars.LowPrices[lows[a]];
+                    double p2 = Bars.LowPrices[lows[b]];
+                    if (Math.Abs(p1 - p2) <= tol)
+                    {
+                        eqLevel = (p1 + p2) / 2.0;
+                        eqSecondIdx = Math.Min(lows[a], lows[b]);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        private bool TryFindEqualHigh(int start, int end, double tol, out double eqLevel, out int eqSecondIdx)
+        {
+            eqLevel = double.NaN;
+            eqSecondIdx = -1;
+
+            var highs = new List<int>();
+            for (int k = end; k >= start; k--)
+                if (IsPivotHigh(k, SwingPivotLeft, SwingPivotRight)) highs.Add(k);
+
+            if (highs.Count < 2) return false;
+
+            for (int a = 0; a < highs.Count; a++)
+            {
+                for (int b = a + 1; b < highs.Count; b++)
+                {
+                    double p1 = Bars.HighPrices[highs[a]];
+                    double p2 = Bars.HighPrices[highs[b]];
+                    if (Math.Abs(p1 - p2) <= tol)
+                    {
+                        eqLevel = (p1 + p2) / 2.0;
+                        eqSecondIdx = Math.Min(highs[a], highs[b]);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // =========================
+        // Fib + retrace + entry
+        // =========================
+        private double FibRetracePrice(double level)
+        {
+            double range = Math.Abs(_swingEndPrice - _swingStartPrice);
+            if (_setupDirection == TradeType.Buy)
+                return _swingEndPrice - range * level;
+            return _swingEndPrice + range * level;
+        }
+
+        private double FibExtensionPrice(double ext)
+        {
+            double range = Math.Abs(_swingEndPrice - _swingStartPrice);
+            if (_setupDirection == TradeType.Buy)
+                return _swingStartPrice + range * ext;
+            return _swingStartPrice - range * ext;
+        }
+
+        private void TryTrackRetracementAndArm(int i)
+        {
+            if (_impulseEndIndex < 0) { ResetSetup("NO_IMPULSE"); return; }
+
+            if (i - _impulseEndIndex > MaxRetraceBars)
+            {
+                ResetSetup("RETRACE_TIMEOUT");
+                return;
+            }
+
+            double invBuf = InvalidationBufferPips * Symbol.PipSize;
+            double invPrice = FibRetracePrice(InvalidationLevel);
+
+            if (_setupDirection == TradeType.Buy && Bars.ClosePrices[i] < invPrice - invBuf)
+            {
+                ResetSetup("INVALIDATION_BULL");
+                return;
+            }
+            if (_setupDirection == TradeType.Sell && Bars.ClosePrices[i] > invPrice + invBuf)
+            {
+                ResetSetup("INVALIDATION_BEAR");
+                return;
+            }
+
+            // messy retrace filter
+            int closesAgainst = 0;
+            int from = Math.Max(_impulseEndIndex + 1, i - MaxRetraceBars);
+            for (int k = from; k <= i; k++)
+            {
+                double c = Bars.ClosePrices[k];
+                double ef = _emaFast.Result[k];
+
+                if (_setupDirection == TradeType.Buy)
+                {
+                    if (c < ef) closesAgainst++;
+                }
+                else
+                {
+                    if (c > ef) closesAgainst++;
+                }
+            }
+            if (closesAgainst > MaxClosesBeyondFastEmaDuringRetrace)
+            {
+                ResetSetup("RETRACE_MESSY");
+                return;
+            }
+
+            double zA = FibRetracePrice(FibZoneMin);
+            double zB = FibRetracePrice(FibZoneMax);
+            double zLow = Math.Min(zA, zB);
+            double zHigh = Math.Max(zA, zB);
+
+            double touchValue = RetraceTouchUsesWick
+                ? (_setupDirection == TradeType.Buy ? Bars.LowPrices[i] : Bars.HighPrices[i])
+                : Bars.ClosePrices[i];
+
+            bool touched = (touchValue >= zLow && touchValue <= zHigh);
+
+            if (_retraceTouchIndex < 0)
+            {
+                if (touched)
+                {
+                    _retraceTouchIndex = i;
+                    _state = BotState.Retracing;
+                }
+                return;
+            }
+
+            if (double.IsNaN(_entryBreakLevel))
+            {
+                int p = i - EntryPivotRight;
+                if (p <= _retraceTouchIndex) return;
+
+                if (_setupDirection == TradeType.Buy)
+                {
+                    if (IsPivotHigh(p, EntryPivotLeft, EntryPivotRight))
+                    {
+                        _entryBreakLevel = Bars.HighPrices[p] + EntryBufferPips * Symbol.PipSize;
+                        _state = BotState.Armed;
+                    }
+                }
+                else
+                {
+                    if (IsPivotLow(p, EntryPivotLeft, EntryPivotRight))
+                    {
+                        _entryBreakLevel = Bars.LowPrices[p] - EntryBufferPips * Symbol.PipSize;
+                        _state = BotState.Armed;
+                    }
+                }
+            }
+        }
+
+        private void TryEntry(int i)
+        {
+            if (double.IsNaN(_entryBreakLevel)) return;
+
+            bool breakOk = _setupDirection == TradeType.Buy
+                ? Bars.ClosePrices[i] > _entryBreakLevel
+                : Bars.ClosePrices[i] < _entryBreakLevel;
+
+            if (!breakOk) return;
+
+            // late entry filter vs zone midpoint
+            double zMid = (FibRetracePrice(FibZoneMin) + FibRetracePrice(FibZoneMax)) * 0.5;
+            double distPips = Math.Abs(Bars.ClosePrices[i] - zMid) / Symbol.PipSize;
+            if (distPips > MaxEntryDistancePips)
+            {
+                ResetSetup("LATE_ENTRY");
+                return;
+            }
+
+            var sltp = ComputeStopsTargets();
+            if (sltp.slPips < 1 || sltp.tpPips < 1)
+            {
+                ResetSetup("BAD_SLTP");
+                return;
+            }
+
+            double units = ComputeVolumeInUnits(sltp.slPips);
+            if (units < Symbol.VolumeInUnitsMin)
+            {
+                ResetSetup("VOL_SMALL");
+                return;
+            }
+
+            if (CountOpenMainPositions() >= MaxOpenPositions)
+                return;
+
+            var res = ExecuteMarketOrder(_setupDirection, SymbolName, units, LabelMain, sltp.slPips, sltp.tpPips);
+            if (!res.IsSuccessful || res.Position == null)
+            {
+                Print("[ERR] Order failed: {0}", res.Error);
+                ResetSetup("ORDER_FAIL");
+                return;
+            }
+
+            _partialDone = false;
+            _beDone = false;
+            _hedgeOpenedAtBarIndex = -1;
+            _state = BotState.InTrade;
+        }
+
+        private (double slPips, double tpPips) ComputeStopsTargets()
+        {
+            double atr = _atr.Result.LastValue;
+
+            GetVolatilityMultipliers(out double slReg, out double tpReg);
+
+            double fibInv = FibRetracePrice(InvalidationLevel);
+            double slBuf = SLBufferPips * Symbol.PipSize;
+
+            if (_setupDirection == TradeType.Buy)
+            {
+                double anchor = Math.Min(_swingStartPrice, fibInv) - slBuf;
+                double entry = Symbol.Ask;
+                double baseSlPips = (entry - anchor) / Symbol.PipSize;
+                double atrSlPips = (atr * SL_ATR_Mult * slReg) / Symbol.PipSize;
+                double slPips = Math.Max(baseSlPips, atrSlPips);
+
+                double tpPrice = FibExtensionPrice(FibTargetExtension);
+                double baseTpPips = (tpPrice - entry) / Symbol.PipSize;
+                double atrTpPips = (atr * TP_ATR_Mult * tpReg) / Symbol.PipSize;
+                double tpPips = Math.Max(baseTpPips, atrTpPips);
+
+                return (Math.Round(slPips, 1), Math.Round(tpPips, 1));
+            }
+            else
+            {
+                double anchor = Math.Max(_swingStartPrice, fibInv) + slBuf;
+                double entry = Symbol.Bid;
+                double baseSlPips = (anchor - entry) / Symbol.PipSize;
+                double atrSlPips = (atr * SL_ATR_Mult * slReg) / Symbol.PipSize;
+                double slPips = Math.Max(baseSlPips, atrSlPips);
+
+                double tpPrice = FibExtensionPrice(FibTargetExtension);
+                double baseTpPips = (entry - tpPrice) / Symbol.PipSize;
+                double atrTpPips = (atr * TP_ATR_Mult * tpReg) / Symbol.PipSize;
+                double tpPips = Math.Max(baseTpPips, atrTpPips);
+
+                return (Math.Round(slPips, 1), Math.Round(tpPips, 1));
+            }
+        }
+
+        private void GetVolatilityMultipliers(out double slReg, out double tpReg)
+        {
+            slReg = NormalVol_SLMulti;
+            tpReg = NormalVol_TPMulti;
+
+            double atr = _volAtr.Result.LastValue;
+            double atrMa = _volAtrSma.Result.LastValue;
+            if (atrMa <= 0) return;
+
+            double ratio = atr / atrMa;
+
+            if (ratio < LowVolThreshold)
+            {
+                slReg = LowVol_SLMulti;
+                tpReg = LowVol_TPMulti;
+            }
+            else if (ratio > HighVolThreshold)
+            {
+                slReg = HighVol_SLMulti;
+                tpReg = HighVol_TPMulti;
+            }
+        }
+
+        private double ComputeVolumeInUnits(double slPips)
+        {
+            double riskAmount = Account.Equity * (RiskPerTradePercent / 100.0);
+            double lots = riskAmount / (Symbol.PipValue * slPips);
+            if (lots <= 0) return 0;
+
+            double units = lots * Symbol.LotSize;
+            return Symbol.NormalizeVolumeInUnits(units, RoundingMode.ToNearest);
+        }
+
+        // =========================
+        // Manage open positions
+        // =========================
+        private void ManageOpenPositions(int i)
+        {
+            Position main = Positions.Find(LabelMain, SymbolName);
+            if (main == null)
+                return;
+
+            double entry = main.EntryPrice;
+            double sl = main.StopLoss ?? entry;
+            double riskPips = Math.Abs(entry - sl) / Symbol.PipSize;
+            if (riskPips < 0.1) riskPips = 0.1;
+
+            double current = main.TradeType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
+            double movePips = main.TradeType == TradeType.Buy
+                ? (current - entry) / Symbol.PipSize
+                : (entry - current) / Symbol.PipSize;
+
+            if (EnablePartials && !_partialDone && movePips >= (PartialAtR * riskPips))
+            {
+                double closeUnits = main.VolumeInUnits * (PartialClosePercent / 100.0);
+                closeUnits = Symbol.NormalizeVolumeInUnits(closeUnits, RoundingMode.ToNearest);
+
+                if (closeUnits >= Symbol.VolumeInUnitsMin && closeUnits < main.VolumeInUnits)
+                {
+                    ClosePosition(main, closeUnits);
+                    _partialDone = true;
+                }
+            }
+
+            if (EnableBreakEven && !_beDone && movePips >= (BreakEvenAtR * riskPips))
+            {
+                double be = entry + (main.TradeType == TradeType.Buy ? 1 : -1) * BreakEvenPlusPips * Symbol.PipSize;
+                ModifyPosition(main, be, main.TakeProfit);
+                _beDone = true;
+            }
+
+            if (EnableHedging)
+                TryHedge(i, main);
+        }
+
+        private void TryHedge(int i, Position main)
+        {
+            Position hedge = Positions.Find(LabelHedge, SymbolName);
+
+            if (hedge != null)
+            {
+                if (_hedgeOpenedAtBarIndex >= 0 && (i - _hedgeOpenedAtBarIndex) >= HedgeMaxBarsOpen)
+                {
+                    ClosePosition(hedge);
+                    _hedgeOpenedAtBarIndex = -1;
+                }
+                if (main.GrossProfit >= 0)
+                {
+                    ClosePosition(hedge);
+                    _hedgeOpenedAtBarIndex = -1;
+                }
+                return;
+            }
+
+            if (MaxHedgesPerTrade <= 0)
+                return;
+
+            double atr = _atr.Result.LastValue;
+            double trigger = HedgeTriggerATR * atr;
+
+            double current = main.TradeType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
+            double adverseMove = main.TradeType == TradeType.Buy ? (main.EntryPrice - current) : (current - main.EntryPrice);
+            if (adverseMove < trigger)
+                return;
+
+            TradeType hedgeDir = main.TradeType == TradeType.Buy ? TradeType.Sell : TradeType.Buy;
+            double hedgeUnits = main.VolumeInUnits * (HedgeSizePercent / 100.0);
+            hedgeUnits = Symbol.NormalizeVolumeInUnits(hedgeUnits, RoundingMode.ToNearest);
+            if (hedgeUnits < Symbol.VolumeInUnitsMin)
+                return;
+
+            double hedgeSlPips = (HedgeSL_ATR * atr) / Symbol.PipSize;
+            double hedgeTpPips = (HedgeTP_ATR * atr) / Symbol.PipSize;
+
+            var res = ExecuteMarketOrder(hedgeDir, SymbolName, hedgeUnits, LabelHedge, hedgeSlPips, hedgeTpPips);
+            if (res.IsSuccessful && res.Position != null)
+                _hedgeOpenedAtBarIndex = i;
+        }
+
+        // ✅ FIX: event handler (no override)
+        private void OnPositionsClosed(PositionClosedEventArgs args)
+        {
+            if (args.Position.SymbolName != SymbolName)
+                return;
+
+            if (args.Position.Label == LabelMain)
+            {
+                if (args.Position.GrossProfit < 0) _consecutiveLosses++;
+                else _consecutiveLosses = 0;
+
+                int i = Bars.Count - 2;
+                int cd = args.Position.GrossProfit < 0 ? CooldownBarsAfterLoss : CooldownBarsAfterClose;
+                _cooldownUntilBarIndex = i + cd;
+
+                // close hedge if main closes
+                Position hedge = Positions.Find(LabelHedge, SymbolName);
+                if (hedge != null)
+                    ClosePosition(hedge);
+
+                ResetSetup("MAIN_CLOSED");
+            }
+            else if (args.Position.Label == LabelHedge)
+            {
+                _hedgeOpenedAtBarIndex = -1;
+            }
+        }
+
+        private int CountOpenMainPositions()
+        {
+            // ✅ FIX for Count() error: FindAll returns array -> Length
+            return Positions.FindAll(LabelMain, SymbolName).Length;
+        }
+
+        private bool IsDailyLossLimitHit()
+        {
+            double dd = (_dayStartEquity - Account.Equity) / Math.Max(_dayStartEquity, 1e-9) * 100.0;
+            return dd >= MaxDailyLossPercent;
+        }
+
+        private void ResetSetup(string reason)
+        {
+            _state = BotState.Idle;
+            _impulseStartIndex = _impulseEndIndex = -1;
+            _retraceTouchIndex = -1;
+            _entryBreakLevel = double.NaN;
+            _swingStartPrice = _swingEndPrice = double.NaN;
+        }
+    }
+}

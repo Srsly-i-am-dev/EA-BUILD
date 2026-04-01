@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip show:*)",
+      "Read(//c/Program Files/**)",
+      "Read(//c/Users/DEV/AppData/Roaming/**)",
+      "Read(//c/Users/DEV/**)",
+      "Bash(pip3 --version)",
+      "Bash(pip3.14 --version)",
+      "Bash(python3 -m pip --version)",
+      "Bash(python3 -m pip install MetaTrader5)",
+      "Bash(mkdir -p \"C:/Users/DEV/OneDrive/Desktop/EA BUILD/.claude/commands\")",
+      "Bash(mkdir -p \"C:/Users/DEV/OneDrive/Desktop/EA BUILD/.claude/agents\")",
+      "Bash(python optimizer/mt5_backtest.py --copy)",
+      "Bash(python optimizer/mt5_backtest.py --compile --ea GoldBB)",
+      "Bash(python optimizer/mt5_backtest.py --compile --ea GoldPattern)",
+      "Bash(python optimizer/mt5_backtest.py --ea GoldBB --symbol XAUUSD --tf M5 --period \"2024.01.01-2025.01.01\")",
+      "Bash(python optimizer/mt5_backtest.py --ea GoldPattern --symbol XAUUSD --tf M5 --period \"2024.01.01-2025.01.01\")",
+      "Bash(tasklist)",
+      "Bash(taskkill /IM terminal64.exe /F)",
+      "Bash(cmd.exe /c \"taskkill /IM terminal64.exe /F\")",
+      "Bash(cmd.exe /c \"tasklist | findstr terminal64\")"
+    ]
+  }
+}

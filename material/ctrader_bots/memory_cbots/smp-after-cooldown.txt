@@ -1,0 +1,335 @@
+using cAlgo.API;
+using cAlgo.API.Indicators;
+using System;
+
+namespace cAlgo.Robots
+{
+    [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
+    public class SMP_AfterCooldown : Robot
+    {
+        // =========================
+        // CORE PARAMETERS
+        // =========================
+        [Parameter("EMA Fast", DefaultValue = 50)]
+        public int EmaFast { get; set; }
+
+        [Parameter("EMA Slow", DefaultValue = 200)]
+        public int EmaSlow { get; set; }
+
+        [Parameter("ATR Period", DefaultValue = 14)]
+        public int AtrPeriod { get; set; }
+
+        [Parameter("Swing Lookback", DefaultValue = 15)]
+        public int SwingLookback { get; set; }
+
+        [Parameter("Min Impulse ATR", DefaultValue = 0.8)]
+        public double MinImpulseATR { get; set; }
+
+        [Parameter("Risk %", DefaultValue = 0.5)]
+        public double RiskPercent { get; set; }
+
+        [Parameter("Max Lots", DefaultValue = 0.5)]
+        public double MaxLots { get; set; }
+
+        // =========================
+        // CUSTOM SL / TP (optional)
+        // =========================
+        [Parameter("Custom Stop Loss (pips, 0 = use original)", DefaultValue = 0)]
+        public double CustomSL { get; set; }
+
+        [Parameter("Custom Take Profit (pips, 0 = use original)", DefaultValue = 0)]
+        public double CustomTP { get; set; }
+
+        // =========================
+        // COOLDOWN PARAMETERS
+        // =========================
+        [Parameter("Cooldown Bars After Trade", DefaultValue = 6, MinValue = 0)]
+        public int CooldownBars { get; set; }
+
+        [Parameter("Require New Swing After Cooldown", DefaultValue = true)]
+        public bool RequireNewSwing { get; set; }
+
+        // =========================
+        // PRIVATE STATE
+        // =========================
+        private ExponentialMovingAverage emaFast, emaSlow;
+        private AverageTrueRange atr;
+
+        private bool setupActive;
+        private TradeType setupType;
+        private double fibLow, fibHigh;
+        private double sl, tp;
+        private int setupBarIndex;
+
+        private const string BotLabel = "SMP_COOLDOWN";
+
+        // Cooldown tracking
+        private bool inCooldown;
+        private int cooldownStartBarIndex;
+
+        // Swing tracking for "require new swing" logic
+        private double lastSwingHigh;
+        private double lastSwingLow;
+        private bool newSwingDetected;
+
+        protected override void OnStart()
+        {
+            emaFast = Indicators.ExponentialMovingAverage(Bars.ClosePrices, EmaFast);
+            emaSlow = Indicators.ExponentialMovingAverage(Bars.ClosePrices, EmaSlow);
+            atr = Indicators.AverageTrueRange(AtrPeriod, MovingAverageType.Simple);
+
+            // Subscribe to position close events to start cooldown
+            Positions.Closed += OnPositionClosed;
+
+            inCooldown = false;
+            newSwingDetected = true; // allow first trade
+            lastSwingHigh = double.MinValue;
+            lastSwingLow = double.MaxValue;
+        }
+
+        protected override void OnBar()
+        {
+            int i = Bars.Count - 2;
+            if (i < SwingLookback + 5)
+                return;
+
+            if (!IsLondonOrNY())
+                return;
+
+            // Block if THIS bot already has an open position on THIS symbol
+            if (Positions.Find(BotLabel, SymbolName) != null)
+                return;
+
+            // Block if setup already active
+            if (setupActive)
+                return;
+
+            // ==========================================
+            // COOLDOWN CHECK
+            // ==========================================
+            if (inCooldown)
+            {
+                int barsSinceCooldown = i - cooldownStartBarIndex;
+
+                // Check if minimum cooldown bars have passed
+                if (barsSinceCooldown < CooldownBars)
+                    return;
+
+                // Cooldown bars passed — now check if we also need a new swing
+                if (RequireNewSwing && !newSwingDetected)
+                {
+                    // Check if a new swing has formed since cooldown started
+                    DetectNewSwing(i);
+                    if (!newSwingDetected)
+                        return; // still waiting for new swing structure
+                }
+
+                // Cooldown is over
+                inCooldown = false;
+            }
+
+            // ==========================================
+            // STANDARD ENTRY LOGIC
+            // ==========================================
+            bool bullishTrend = emaFast.Result[i] > emaSlow.Result[i];
+            bool bearishTrend = emaFast.Result[i] < emaSlow.Result[i];
+
+            double high = double.MinValue;
+            double low = double.MaxValue;
+
+            for (int x = i - SwingLookback; x <= i; x++)
+            {
+                high = Math.Max(high, Bars.HighPrices[x]);
+                low = Math.Min(low, Bars.LowPrices[x]);
+            }
+
+            double impulse = high - low;
+            if (impulse < atr.Result[i] * MinImpulseATR)
+                return;
+
+            if (bullishTrend && IsBullishImpulse(i))
+            {
+                double f50 = high - impulse * 0.50;
+                double f618 = high - impulse * 0.618;
+
+                ActivateSetup(
+                    TradeType.Buy,
+                    Math.Min(f50, f618),
+                    Math.Max(f50, f618),
+                    Bars.LowPrices[i] - atr.Result[i] * 0.8,
+                    high + atr.Result[i] * 1.5,
+                    i
+                );
+            }
+            else if (bearishTrend && IsBearishImpulse(i))
+            {
+                double f50 = low + impulse * 0.50;
+                double f618 = low + impulse * 0.618;
+
+                ActivateSetup(
+                    TradeType.Sell,
+                    Math.Min(f50, f618),
+                    Math.Max(f50, f618),
+                    Bars.HighPrices[i] + atr.Result[i] * 0.8,
+                    low - atr.Result[i] * 1.5,
+                    i
+                );
+            }
+        }
+
+        protected override void OnTick()
+        {
+            if (!setupActive || Positions.Find(BotLabel, SymbolName) != null)
+                return;
+
+            // Setup valid for 3 bars
+            if (Bars.Count - 2 > setupBarIndex + 3)
+            {
+                ResetSetup();
+                return;
+            }
+
+            // Trigger using correct side (Ask for Buy, Bid for Sell)
+            double triggerPrice = setupType == TradeType.Buy ? Symbol.Ask : Symbol.Bid;
+
+            if (triggerPrice >= fibLow && triggerPrice <= fibHigh)
+            {
+                ExecuteTrade(setupType, sl, tp);
+                ResetSetup();
+            }
+        }
+
+        // ==========================================
+        // COOLDOWN & SWING DETECTION
+        // ==========================================
+        private void OnPositionClosed(PositionClosedEventArgs args)
+        {
+            var p = args.Position;
+            if (p == null) return;
+            if (p.SymbolName != SymbolName) return;
+            if (!string.Equals(p.Label, BotLabel, StringComparison.Ordinal)) return;
+
+            // Start cooldown
+            inCooldown = true;
+            cooldownStartBarIndex = Bars.Count - 2;
+            newSwingDetected = false;
+
+            // Record current swing levels to detect a NEW swing later
+            int i = Bars.Count - 2;
+            lastSwingHigh = double.MinValue;
+            lastSwingLow = double.MaxValue;
+            for (int x = Math.Max(0, i - SwingLookback); x <= i; x++)
+            {
+                lastSwingHigh = Math.Max(lastSwingHigh, Bars.HighPrices[x]);
+                lastSwingLow = Math.Min(lastSwingLow, Bars.LowPrices[x]);
+            }
+        }
+
+        private void DetectNewSwing(int i)
+        {
+            // A "new swing" = the current lookback window has formed a NEW
+            // swing high or swing low that is DIFFERENT from the one at cooldown start.
+            // This means the market has made a fresh structural move.
+
+            double currentHigh = double.MinValue;
+            double currentLow = double.MaxValue;
+
+            for (int x = Math.Max(0, i - SwingLookback); x <= i; x++)
+            {
+                currentHigh = Math.Max(currentHigh, Bars.HighPrices[x]);
+                currentLow = Math.Min(currentLow, Bars.LowPrices[x]);
+            }
+
+            // New swing detected if either:
+            // 1) A new higher high has formed (fresh bullish swing)
+            // 2) A new lower low has formed (fresh bearish swing)
+            double threshold = atr.Result[i] * 0.3; // swing must differ by at least 0.3 ATR
+
+            if (currentHigh > lastSwingHigh + threshold ||
+                currentLow < lastSwingLow - threshold)
+            {
+                newSwingDetected = true;
+            }
+        }
+
+        // ==========================================
+        // SETUP / TRADE EXECUTION
+        // ==========================================
+        private void ActivateSetup(TradeType type, double fLow, double fHigh, double slBase, double tpBase, int barIndex)
+        {
+            setupType = type;
+            fibLow = fLow;
+            fibHigh = fHigh;
+            sl = slBase;
+            tp = tpBase;
+            setupBarIndex = barIndex;
+            setupActive = true;
+        }
+
+        private void ResetSetup()
+        {
+            setupActive = false;
+        }
+
+        private void ExecuteTrade(TradeType type, double slBasePrice, double tpBasePrice)
+        {
+            double entryPrice = type == TradeType.Buy ? Symbol.Ask : Symbol.Bid;
+
+            // Build SL/TP as absolute prices
+            double finalSLPrice = slBasePrice;
+            double finalTPPrice = tpBasePrice;
+
+            if (CustomSL > 0)
+            {
+                finalSLPrice = type == TradeType.Buy
+                    ? entryPrice - CustomSL * Symbol.PipSize
+                    : entryPrice + CustomSL * Symbol.PipSize;
+            }
+
+            if (CustomTP > 0)
+            {
+                finalTPPrice = type == TradeType.Buy
+                    ? entryPrice + CustomTP * Symbol.PipSize
+                    : entryPrice - CustomTP * Symbol.PipSize;
+            }
+
+            double riskPips = Math.Abs(entryPrice - finalSLPrice) / Symbol.PipSize;
+            if (riskPips < 5)
+                return;
+
+            double riskMoney = Account.Balance * (RiskPercent / 100.0);
+            double volumeUnits = riskMoney / (riskPips * Symbol.PipValue);
+            volumeUnits = Math.Min(volumeUnits, Symbol.QuantityToVolumeInUnits(MaxLots));
+            volumeUnits = Symbol.NormalizeVolumeInUnits(volumeUnits);
+
+            // Open order first, then set SL/TP as absolute prices
+            var result = ExecuteMarketOrder(type, SymbolName, volumeUnits, BotLabel);
+
+            if (result == null || !result.IsSuccessful || result.Position == null)
+                return;
+
+            ModifyPosition(result.Position, finalSLPrice, finalTPPrice, ProtectionType.Absolute);
+        }
+
+        // ==========================================
+        // HELPERS
+        // ==========================================
+        private bool IsBullishImpulse(int i)
+        {
+            return Bars.ClosePrices[i] > Bars.OpenPrices[i] &&
+                   (Bars.ClosePrices[i] - Bars.OpenPrices[i]) > atr.Result[i] * 0.4;
+        }
+
+        private bool IsBearishImpulse(int i)
+        {
+            return Bars.ClosePrices[i] < Bars.OpenPrices[i] &&
+                   (Bars.OpenPrices[i] - Bars.ClosePrices[i]) > atr.Result[i] * 0.4;
+        }
+
+        private bool IsLondonOrNY()
+        {
+            int h = Server.Time.Hour;
+            return h >= 7 && h <= 21;
+        }
+    }
+}

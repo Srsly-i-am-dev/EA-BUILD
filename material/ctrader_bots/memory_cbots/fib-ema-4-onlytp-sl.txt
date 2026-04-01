@@ -1,0 +1,416 @@
+using cAlgo.API;
+using cAlgo.API.Indicators;
+using System;
+
+namespace cAlgo.Robots
+{
+    [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
+    public class XAU_FibEMA_Intraday_ACTIVE_v2 : Robot
+    {
+        [Parameter("EMA Fast", DefaultValue = 50)]
+        public int EmaFast { get; set; }
+
+        [Parameter("EMA Slow", DefaultValue = 200)]
+        public int EmaSlow { get; set; }
+
+        [Parameter("ATR Period", DefaultValue = 14)]
+        public int AtrPeriod { get; set; }
+
+        [Parameter("Swing Lookback", DefaultValue = 15)]
+        public int SwingLookback { get; set; }
+
+        [Parameter("Min Impulse ATR", DefaultValue = 0.8)]
+        public double MinImpulseATR { get; set; }
+
+        [Parameter("Risk %", DefaultValue = 0.5)]
+        public double RiskPercent { get; set; }
+
+        [Parameter("Max Lots", DefaultValue = 0.5)]
+        public double MaxLots { get; set; }
+
+        // -----------------------------------------------
+        // EXISTING PARAMETERS (Manual/Custom TP/SL Pips)
+        // -----------------------------------------------
+        [Parameter("Custom Stop Loss (pips, 0 = ignore)", DefaultValue = 0)]
+        public double CustomSL { get; set; }
+
+        [Parameter("Custom Take Profit (pips, 0 = ignore)", DefaultValue = 0)]
+        public double CustomTP { get; set; }
+
+        // -----------------------------------------------
+        // NEW: Risk management selector
+        // -----------------------------------------------
+        public enum RiskMode
+        {
+            OriginalStrategy = 0,       // use original slBase/tpBase as computed by the strategy
+            AtrFromEntry = 1,           // SL/TP = ATR multipliers from entry
+            MultiplyOriginalDistances = 2, // multiply original SL/TP distances
+            CustomPips = 3              // use CustomSL/CustomTP (pips)
+        }
+
+        [Parameter("Risk Mode", DefaultValue = RiskMode.OriginalStrategy)]
+        public RiskMode RiskManagement { get; set; }
+
+        // ATR-from-entry multipliers
+        [Parameter("ATR SL Mult (mode=AtrFromEntry)", DefaultValue = 1.0)]
+        public double AtrSLMult { get; set; }
+
+        [Parameter("ATR TP Mult (mode=AtrFromEntry)", DefaultValue = 1.5)]
+        public double AtrTPMult { get; set; }
+
+        // Multiply-original-distance multipliers
+        [Parameter("SL Mult (mode=MultiplyOriginalDistances)", DefaultValue = 1.0)]
+        public double SLMultiplier { get; set; }
+
+        [Parameter("TP Mult (mode=MultiplyOriginalDistances)", DefaultValue = 1.0)]
+        public double TPMultiplier { get; set; }
+
+        // -----------------------------------------------
+        // NEW: Drawdown Kill Switch
+        // -----------------------------------------------
+        public enum DrawdownBasis
+        {
+            FromPeakEquity = 0,
+            FromStartBalance = 1
+        }
+
+        [Parameter("Max Drawdown % (0 = off)", DefaultValue = 0)]
+        public double MaxDrawdownPercent { get; set; }
+
+        [Parameter("Drawdown Basis", DefaultValue = DrawdownBasis.FromPeakEquity)]
+        public DrawdownBasis DDBasis { get; set; }
+
+        [Parameter("KillSwitch: Close Positions", DefaultValue = true)]
+        public bool KillSwitchClosePositions { get; set; }
+
+        [Parameter("KillSwitch: Stop cBot", DefaultValue = true)]
+        public bool KillSwitchStopBot { get; set; }
+
+        [Parameter("Trade Label", DefaultValue = "XAU_FIB_ACTIVE_V2")]
+        public string TradeLabel { get; set; }
+
+        private ExponentialMovingAverage emaFast, emaSlow;
+        private AverageTrueRange atr;
+
+        private bool setupActive;
+        private TradeType setupType;
+        private double fibLow, fibHigh;
+        private double sl, tp;
+        private int setupBarIndex;
+
+        // Kill switch state
+        private bool tradingHalted;
+        private double startBalance;
+        private double peakEquity;
+
+        protected override void OnStart()
+        {
+            emaFast = Indicators.ExponentialMovingAverage(Bars.ClosePrices, EmaFast);
+            emaSlow = Indicators.ExponentialMovingAverage(Bars.ClosePrices, EmaSlow);
+            atr = Indicators.AverageTrueRange(AtrPeriod, MovingAverageType.Simple);
+
+            startBalance = Account.Balance;
+            peakEquity = Account.Equity;
+            tradingHalted = false;
+        }
+
+        protected override void OnBar()
+        {
+            if (CheckAndApplyKillSwitch())
+                return;
+
+            int i = Bars.Count - 2;
+            if (i < SwingLookback + 5)
+                return;
+
+            if (!IsLondonOrNY())
+                return;
+
+            if (Positions.Count > 0 || setupActive)
+                return;
+
+            bool bullishTrend = emaFast.Result[i] > emaSlow.Result[i];
+            bool bearishTrend = emaFast.Result[i] < emaSlow.Result[i];
+
+            double high = double.MinValue;
+            double low = double.MaxValue;
+
+            for (int x = i - SwingLookback; x <= i; x++)
+            {
+                high = Math.Max(high, Bars.HighPrices[x]);
+                low = Math.Min(low, Bars.LowPrices[x]);
+            }
+
+            double impulse = high - low;
+            if (impulse < atr.Result[i] * MinImpulseATR)
+                return;
+
+            if (bullishTrend && IsBullishImpulse(i))
+            {
+                double f50 = high - impulse * 0.50;
+                double f618 = high - impulse * 0.618;
+
+                ActivateSetup(
+                    TradeType.Buy,
+                    Math.Min(f50, f618),
+                    Math.Max(f50, f618),
+                    Bars.LowPrices[i] - atr.Result[i] * 0.8,
+                    high + atr.Result[i] * 1.5,
+                    i
+                );
+            }
+            else if (bearishTrend && IsBearishImpulse(i))
+            {
+                double f50 = low + impulse * 0.50;
+                double f618 = low + impulse * 0.618;
+
+                ActivateSetup(
+                    TradeType.Sell,
+                    Math.Min(f50, f618),
+                    Math.Max(f50, f618),
+                    Bars.HighPrices[i] + atr.Result[i] * 0.8,
+                    low - atr.Result[i] * 1.5,
+                    i
+                );
+            }
+        }
+
+        protected override void OnTick()
+        {
+            if (CheckAndApplyKillSwitch())
+                return;
+
+            if (!setupActive || Positions.Count > 0)
+                return;
+
+            // setup valid for 3 bars
+            if (Bars.Count - 2 > setupBarIndex + 3)
+            {
+                ResetSetup();
+                return;
+            }
+
+            double price = setupType == TradeType.Buy ? Symbol.Bid : Symbol.Ask;
+
+            if (price >= fibLow && price <= fibHigh)
+            {
+                ExecuteTrade(setupType, sl, tp);
+                ResetSetup();
+            }
+        }
+
+        private void ActivateSetup(
+            TradeType type,
+            double fLow,
+            double fHigh,
+            double slBase,
+            double tpBase,
+            int barIndex)
+        {
+            setupType = type;
+            fibLow = fLow;
+            fibHigh = fHigh;
+            sl = slBase;
+            tp = tpBase;
+            setupBarIndex = barIndex;
+            setupActive = true;
+        }
+
+        private void ResetSetup()
+        {
+            setupActive = false;
+        }
+
+        private void ExecuteTrade(TradeType type, double slBase, double tpBase)
+        {
+            if (tradingHalted)
+                return;
+
+            double entry = type == TradeType.Buy ? Symbol.Ask : Symbol.Bid;
+
+            // Start from original strategy SL/TP (prices)
+            double finalSLPrice = slBase;
+            double finalTPPrice = tpBase;
+
+            // Apply selected risk management mode (ONLY affects final SL/TP; signal logic untouched)
+            switch (RiskManagement)
+            {
+                case RiskMode.OriginalStrategy:
+                    // keep finalSLPrice/finalTPPrice as is
+                    break;
+
+                case RiskMode.AtrFromEntry:
+                {
+                    double atrVal = atr.Result[Bars.Count - 2];
+                    if (atrVal <= 0)
+                        return;
+
+                    double slDist = Math.Max(atrVal * AtrSLMult, Symbol.PipSize * 5);
+                    double tpDist = Math.Max(atrVal * AtrTPMult, Symbol.PipSize * 5);
+
+                    if (type == TradeType.Buy)
+                    {
+                        finalSLPrice = entry - slDist;
+                        finalTPPrice = entry + tpDist;
+                    }
+                    else
+                    {
+                        finalSLPrice = entry + slDist;
+                        finalTPPrice = entry - tpDist;
+                    }
+                    break;
+                }
+
+                case RiskMode.MultiplyOriginalDistances:
+                {
+                    // Multiply original SL/TP distances from entry (does not change the original direction)
+                    double origSLDist = Math.Abs(entry - slBase);
+                    double origTPDist = Math.Abs(tpBase - entry);
+
+                    // Basic safety floors
+                    origSLDist = Math.Max(origSLDist, Symbol.PipSize * 5);
+                    origTPDist = Math.Max(origTPDist, Symbol.PipSize * 5);
+
+                    double slDist = origSLDist * Math.Max(0.01, SLMultiplier);
+                    double tpDist = origTPDist * Math.Max(0.01, TPMultiplier);
+
+                    if (type == TradeType.Buy)
+                    {
+                        finalSLPrice = entry - slDist;
+                        finalTPPrice = entry + tpDist;
+                    }
+                    else
+                    {
+                        finalSLPrice = entry + slDist;
+                        finalTPPrice = entry - tpDist;
+                    }
+                    break;
+                }
+
+                case RiskMode.CustomPips:
+                    // Use CustomSL/CustomTP (pips). If missing, fall back to original.
+                    if (CustomSL > 0)
+                    {
+                        if (type == TradeType.Buy)
+                            finalSLPrice = entry - CustomSL * Symbol.PipSize;
+                        else
+                            finalSLPrice = entry + CustomSL * Symbol.PipSize;
+                    }
+
+                    if (CustomTP > 0)
+                    {
+                        if (type == TradeType.Buy)
+                            finalTPPrice = entry + CustomTP * Symbol.PipSize;
+                        else
+                            finalTPPrice = entry - CustomTP * Symbol.PipSize;
+                    }
+                    break;
+            }
+
+            // Optional compatibility: if user left RiskMode as OriginalStrategy,
+            // they can still use CustomSL/CustomTP as overrides (like your original file behavior).
+            if (RiskManagement == RiskMode.OriginalStrategy)
+            {
+                if (CustomSL > 0)
+                {
+                    if (type == TradeType.Buy)
+                        finalSLPrice = entry - CustomSL * Symbol.PipSize;
+                    else
+                        finalSLPrice = entry + CustomSL * Symbol.PipSize;
+                }
+
+                if (CustomTP > 0)
+                {
+                    if (type == TradeType.Buy)
+                        finalTPPrice = entry + CustomTP * Symbol.PipSize;
+                    else
+                        finalTPPrice = entry - CustomTP * Symbol.PipSize;
+                }
+            }
+
+            // Convert final SL/TP prices to pips (cTrader ExecuteMarketOrder expects PIPS in this overload)
+            double slPips = Math.Abs(entry - finalSLPrice) / Symbol.PipSize;
+            double tpPips = Math.Abs(finalTPPrice - entry) / Symbol.PipSize;
+
+            if (slPips < 5)
+                return;
+
+            // Position sizing based on SL pips
+            double riskMoney = Account.Balance * (RiskPercent / 100.0);
+            double volumeUnits = riskMoney / (slPips * Symbol.PipValue);
+
+            volumeUnits = Math.Min(volumeUnits, Symbol.QuantityToVolumeInUnits(MaxLots));
+            volumeUnits = Symbol.NormalizeVolumeInUnits(volumeUnits);
+
+            ExecuteMarketOrder(type, SymbolName, volumeUnits, TradeLabel, slPips, tpPips);
+        }
+
+        private bool CheckAndApplyKillSwitch()
+        {
+            if (tradingHalted)
+                return true;
+
+            if (MaxDrawdownPercent <= 0)
+                return false;
+
+            // Track peak equity for peak-based DD
+            peakEquity = Math.Max(peakEquity, Account.Equity);
+
+            double basisValue = (DDBasis == DrawdownBasis.FromPeakEquity) ? peakEquity : startBalance;
+
+            if (basisValue <= 0)
+                return false;
+
+            double dd = (basisValue - Account.Equity) / basisValue * 100.0;
+
+            if (dd >= MaxDrawdownPercent)
+            {
+                tradingHalted = true;
+                ResetSetup();
+
+                Print("KILL SWITCH TRIGGERED: Drawdown {0:F2}% >= Max {1:F2}% (Basis={2}).",
+                    dd, MaxDrawdownPercent, DDBasis);
+
+                if (KillSwitchClosePositions)
+                    ClosePositionsForThisBot();
+
+                if (KillSwitchStopBot)
+                    Stop();
+
+                return true;
+            }
+
+            return false;
+        }
+
+        private void ClosePositionsForThisBot()
+        {
+            foreach (var p in Positions)
+            {
+                // Close only positions that belong to this symbol and label (this bot)
+                if (p.SymbolName == SymbolName && p.Label == TradeLabel)
+                {
+                    ClosePosition(p);
+                }
+            }
+        }
+
+        private bool IsBullishImpulse(int i)
+        {
+            return Bars.ClosePrices[i] > Bars.OpenPrices[i] &&
+                   (Bars.ClosePrices[i] - Bars.OpenPrices[i]) > atr.Result[i] * 0.4;
+        }
+
+        private bool IsBearishImpulse(int i)
+        {
+            return Bars.ClosePrices[i] < Bars.OpenPrices[i] &&
+                   (Bars.OpenPrices[i] - Bars.ClosePrices[i]) > atr.Result[i] * 0.4;
+        }
+
+        private bool IsLondonOrNY()
+        {
+            int h = Server.Time.Hour;
+            return h >= 7 && h <= 21;
+        }
+    }
+}
