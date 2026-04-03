@@ -1,325 +1,230 @@
 //@version=5
-indicator("FB Razor Swing", shorttitle="FBRazor", overlay=true, max_labels_count=500, max_lines_count=500)
+indicator("FB-Razor BOS [Indicator]", shorttitle="FBRazor_BOS", overlay=true, max_labels_count=500, max_lines_count=500)
 
 // ── INPUTS ───────────────────────────────────────────────────
 // EMA Trend
-i_emaFast        = input.int(21,    "EMA Fast",           group="Trend", minval=1)
-i_emaSlow        = input.int(55,    "EMA Slow",           group="Trend", minval=2)
-i_slopeLookback  = input.int(10,    "Slope Lookback",     group="Trend", minval=1)
-i_minSlopePips   = input.float(0.6, "Min Slope (ATR-norm)", group="Trend", step=0.1)
+inp_ema_fast     = input.int(21,      "EMA Fast",                group="Trend", minval=1)
+inp_ema_slow     = input.int(55,      "EMA Slow",                group="Trend", minval=2)
 
 // Swing/Pivot
-i_swingLeft      = input.int(3,     "Swing Pivot Left",   group="Pivot", minval=1)
-i_swingRight     = input.int(3,     "Swing Pivot Right",  group="Pivot", minval=1)
+inp_swing_left   = input.int(10,      "Pivot Left Bars",         group="Pivot", minval=1)
+inp_swing_right  = input.int(5,       "Pivot Right Bars",        group="Pivot", minval=1)
 
-// Impulse
-i_minImpulseATR  = input.float(2.0, "Min Impulse (ATR mult)", group="Impulse", minval=0.1, step=0.1)
-i_maxImpulseBars = input.int(80,    "Max Impulse Bars",   group="Impulse", minval=5)
-i_maxCounterBars = input.int(20,    "Max Counter Closes", group="Impulse", minval=0)
-
-// EQH/EQL
-i_enableEQHL     = input.bool(true, "Enable EQH/EQL",    group="EQH/EQL")
-i_eqTolATR       = input.float(0.3, "EQ Tolerance (ATR)", group="EQH/EQL", step=0.05)
-i_eqLookback     = input.int(200,   "EQ Lookback Bars",  group="EQH/EQL", minval=20)
-i_requireSweep   = input.bool(true, "Require Sweep",     group="EQH/EQL")
-i_sweepATR       = input.float(0.3, "Sweep Break (ATR)", group="EQH/EQL", step=0.05)
-i_sweepReclaim   = input.int(15,    "Sweep Reclaim Bars", group="EQH/EQL", minval=1)
+// ATR / Impulse
+inp_atr_period   = input.int(14,      "ATR Period",              group="Impulse", minval=2)
+inp_atr_mult_min = input.float(0.8,   "Min Impulse ATR Multiple",group="Impulse", step=0.1)
+inp_atr_mult_max = input.float(3.0,   "Max Impulse ATR Multiple",group="Impulse", step=0.1)
 
 // Fibonacci
-i_fibMin         = input.float(0.382,"Fib Zone Min",     group="Fibonacci", minval=0.0, maxval=1.0, step=0.01)
-i_fibMax         = input.float(0.618,"Fib Zone Max",     group="Fibonacci", minval=0.0, maxval=1.0, step=0.01)
-i_invalidation   = input.float(0.786,"Invalidation Level", group="Fibonacci", step=0.01)
-i_maxRetraceBars = input.int(60,    "Max Retrace Bars",  group="Fibonacci", minval=5)
-i_maxBeyondEMA   = input.int(12,    "Max Closes Beyond EMA", group="Fibonacci", minval=0)
+inp_fib_entry_hi = input.float(0.618, "Golden Pocket Top",       group="Fibonacci", step=0.01)
+inp_fib_entry_lo = input.float(0.500, "Golden Pocket Bottom",    group="Fibonacci", step=0.01)
+inp_fib_invalid  = input.float(0.786, "Invalidation Level",      group="Fibonacci", step=0.01)
 
-// Entry
-i_entryLeft      = input.int(2,     "Entry Pivot Left",  group="Entry", minval=1)
-i_entryRight     = input.int(2,     "Entry Pivot Right", group="Entry", minval=1)
-i_maxEntryDist   = input.float(2.0, "Max Entry Dist (ATR)", group="Entry", step=0.1)
-
-// TP/SL
-i_slBufferATR    = input.float(0.15,"SL Buffer (ATR)",   group="TP/SL", step=0.05)
-i_slATRMult      = input.float(1.5, "SL ATR Mult",       group="TP/SL", step=0.1)
-i_fibTarget      = input.float(1.272,"Fib Extension",    group="TP/SL", step=0.01)
-i_tpATRMult      = input.float(2.2, "TP ATR Mult",       group="TP/SL", step=0.1)
-
-// Volatility Regime
-i_volATR         = input.int(14,    "Vol ATR Period",     group="Vol Regime", minval=2)
-i_volMA          = input.int(50,    "Vol MA Period",      group="Vol Regime", minval=5)
-i_lowVolThresh   = input.float(0.85,"Low Vol Threshold",  group="Vol Regime", step=0.05)
-i_highVolThresh  = input.float(1.20,"High Vol Threshold", group="Vol Regime", step=0.05)
-i_lowVolSL       = input.float(0.90,"Low Vol SL Mult",    group="Vol Regime", step=0.05)
-i_lowVolTP       = input.float(0.95,"Low Vol TP Mult",    group="Vol Regime", step=0.05)
-i_highVolSL      = input.float(1.25,"High Vol SL Mult",   group="Vol Regime", step=0.05)
-i_highVolTP      = input.float(1.40,"High Vol TP Mult",   group="Vol Regime", step=0.05)
-
-// Session
-i_useSession     = input.bool(true, "Session Filter",     group="Session")
-
-// ── CALCULATIONS ─────────────────────────────────────────────
-emaFast  = ta.ema(close, i_emaFast)
-emaSlow  = ta.ema(close, i_emaSlow)
-atr14    = ta.atr(14)
-volATR   = ta.atr(i_volATR)
-volMA    = ta.sma(volATR, i_volMA)
-
-// Trend detection
-slopeNorm = atr14 > 0 ? (emaFast - emaFast[i_slopeLookback]) / i_slopeLookback / atr14 : 0
-bullTrend = emaFast > emaSlow and slopeNorm >= i_minSlopePips
-bearTrend = emaFast < emaSlow and slopeNorm <= -i_minSlopePips
-
-// Volatility regime
-volRatio = volMA > 0 ? volATR / volMA : 1.0
-slVolMult = volRatio < i_lowVolThresh ? i_lowVolSL : volRatio > i_highVolThresh ? i_highVolSL : 1.0
-tpVolMult = volRatio < i_lowVolThresh ? i_lowVolTP : volRatio > i_highVolThresh ? i_highVolTP : 1.0
-
-// Pivot detection
-pivotHigh = ta.pivothigh(high, i_swingLeft, i_swingRight)
-pivotLow  = ta.pivotlow(low, i_swingLeft, i_swingRight)
-entryPivotHigh = ta.pivothigh(high, i_entryLeft, i_entryRight)
-entryPivotLow  = ta.pivotlow(low, i_entryLeft, i_entryRight)
-
-// Session filter
-inSession = i_useSession ? (hour(time, "UTC") >= 7 and hour(time, "UTC") <= 21) : true
+// Filters & Display
+inp_require_ema  = input.bool(true,   "Require EMA Trend Filter",group="Filters")
+inp_show_fibs    = input.bool(true,   "Show Fib Levels",         group="Display")
+inp_show_state   = input.bool(true,   "Show State Table",        group="Display")
 
 // ── STATE MACHINE ────────────────────────────────────────────
-// States: 0=Idle, 1=ImpulseFound, 2=Retracing, 3=Armed
-var int   state           = 0
-var int   impulseStartBar = 0
-var int   impulseEndBar   = 0
-var float swingStartPrice = 0.0
-var float swingEndPrice   = 0.0
-var int   setupDir        = 0   // 1=bull, -1=bear
-var int   retraceTouchBar = 0
-var float entryBreakLevel = 0.0
-var int   cooldownUntil   = 0
+// States: 0=Idle, 1=BOS Detected (waiting for retracement), 2=In Golden Pocket (Armed)
+var int   state              = 0
+var int   direction          = 0    // 1=bull, -1=bear
+var float swing_level        = na   // The swing that was broken
+var float impulse_lo         = na   // Origin of bull impulse (swing low before BOS)
+var float impulse_hi         = na   // Top of bull impulse (BOS bar high)
+var float impulse_orig_bear  = na   // Origin of bear impulse (swing high before BOS)
+var float impulse_bot_bear   = na   // Bottom of bear impulse (BOS bar low)
+var float prevSwingHigh      = na
+var float prevSwingLow       = na
 
-// Track recent pivots
-var float lastPivotHighPrice = na
-var int   lastPivotHighBar   = 0
-var float lastPivotLowPrice  = na
-var int   lastPivotLowBar    = 0
+// Tracking for pivot origins
+var float last_swing_low_val  = na
+var float last_swing_high_val = na
 
-if not na(pivotHigh)
-    lastPivotHighPrice := high[i_swingRight]
-    lastPivotHighBar   := bar_index - i_swingRight
+// ── CALCULATIONS ─────────────────────────────────────────────
+ema_fast = ta.ema(close, inp_ema_fast)
+ema_slow = ta.ema(close, inp_ema_slow)
+atr      = ta.atr(inp_atr_period)
 
-if not na(pivotLow)
-    lastPivotLowPrice := low[i_swingRight]
-    lastPivotLowBar   := bar_index - i_swingRight
+trend_bull = ema_fast > ema_slow
+trend_bear = ema_fast < ema_slow
 
-// Fib helpers
-f_fibRetrace(level, startP, endP, dir) =>
-    range_ = math.abs(endP - startP)
-    dir == 1 ? endP - range_ * level : endP + range_ * level
+swingH = ta.pivothigh(high, inp_swing_left, inp_swing_right)
+swingL = ta.pivotlow(low,  inp_swing_left, inp_swing_right)
 
-f_fibExtension(ext, startP, endP, dir) =>
-    range_ = math.abs(endP - startP)
-    dir == 1 ? startP + range_ * ext : startP - range_ * ext
+// Update swing tracking
+if not na(swingL)
+    prevSwingLow       := swingL
+    last_swing_low_val := swingL
 
-// Signal outputs
-var bool buySignal  = false
-var bool sellSignal = false
-var float buySL_price  = na
-var float buyTP_price  = na
-var float sellSL_price = na
-var float sellTP_price = na
-
-buySignal  := false
-sellSignal := false
+if not na(swingH)
+    prevSwingHigh       := swingH
+    last_swing_high_val := swingH
 
 // ── STATE TRANSITIONS ────────────────────────────────────────
 
-// IDLE → IMPULSE FOUND
-if state == 0 and bar_index > cooldownUntil
-    // Bull impulse: pivot low followed by pivot high
-    if bullTrend and not na(lastPivotLowPrice) and not na(lastPivotHighPrice) and lastPivotHighBar > lastPivotLowBar
-        impulsePips = lastPivotHighPrice - lastPivotLowPrice
-        barsUsed = lastPivotHighBar - lastPivotLowBar
-        if impulsePips >= atr14 * i_minImpulseATR and barsUsed <= i_maxImpulseBars and barsUsed > 0
-            // Count counter closes
-            counterCloses = 0
-            for k = lastPivotLowBar to lastPivotHighBar
-                idx = bar_index - k
-                if idx >= 0 and idx < 500 and close[idx] < open[idx]
-                    counterCloses += 1
-            if counterCloses <= i_maxCounterBars
-                swingStartPrice := lastPivotLowPrice
-                swingEndPrice   := lastPivotHighPrice
-                impulseStartBar := lastPivotLowBar
-                impulseEndBar   := lastPivotHighBar
-                setupDir        := 1
-                state           := 1
+// Idle -> BOS Detected
+if state == 0
+    // Bullish BOS: close breaks above previous swing high
+    if not na(prevSwingHigh) and close > prevSwingHigh
+        imp_range = high - last_swing_low_val
+        if not na(last_swing_low_val) and imp_range >= atr * inp_atr_mult_min and imp_range <= atr * inp_atr_mult_max
+            if inp_require_ema == false or trend_bull
+                state        := 1
+                direction    := 1
+                impulse_lo   := last_swing_low_val
+                impulse_hi   := high
+                swing_level  := prevSwingHigh
+                prevSwingHigh := na
 
-    // Bear impulse: pivot high followed by pivot low
-    if state == 0 and bearTrend and not na(lastPivotHighPrice) and not na(lastPivotLowPrice) and lastPivotLowBar > lastPivotHighBar
-        impulsePips = lastPivotHighPrice - lastPivotLowPrice
-        barsUsed = lastPivotLowBar - lastPivotHighBar
-        if impulsePips >= atr14 * i_minImpulseATR and barsUsed <= i_maxImpulseBars and barsUsed > 0
-            counterCloses = 0
-            for k = lastPivotHighBar to lastPivotLowBar
-                idx = bar_index - k
-                if idx >= 0 and idx < 500 and close[idx] > open[idx]
-                    counterCloses += 1
-            if counterCloses <= i_maxCounterBars
-                swingStartPrice := lastPivotHighPrice
-                swingEndPrice   := lastPivotLowPrice
-                impulseStartBar := lastPivotHighBar
-                impulseEndBar   := lastPivotLowBar
-                setupDir        := -1
-                state           := 1
+    // Bearish BOS: close breaks below previous swing low
+    if state == 0 and not na(prevSwingLow) and close < prevSwingLow
+        imp_range = last_swing_high_val - low
+        if not na(last_swing_high_val) and imp_range >= atr * inp_atr_mult_min and imp_range <= atr * inp_atr_mult_max
+            if inp_require_ema == false or trend_bear
+                state            := 1
+                direction        := -1
+                impulse_orig_bear := last_swing_high_val
+                impulse_bot_bear  := low
+                swing_level       := prevSwingLow
+                prevSwingLow      := na
 
-// IMPULSE FOUND / RETRACING → Check invalidation, fib touch, entry pivot
+// ── FIB LEVELS (computed from impulse leg) ───────────────────
+imp_r_bull = (not na(impulse_hi) and not na(impulse_lo)) ? impulse_hi - impulse_lo : na
+f05_bull   = not na(imp_r_bull) ? impulse_hi - 0.500 * imp_r_bull : na
+f618_bull  = not na(imp_r_bull) ? impulse_hi - 0.618 * imp_r_bull : na
+f786_bull  = not na(imp_r_bull) ? impulse_hi - 0.786 * imp_r_bull : na
+f1272_bull = not na(imp_r_bull) ? impulse_hi + 0.272 * imp_r_bull : na
+f1618_bull = not na(imp_r_bull) ? impulse_hi + 0.618 * imp_r_bull : na
+f2000_bull = not na(imp_r_bull) ? impulse_hi + 1.000 * imp_r_bull : na
+
+imp_r_bear = (not na(impulse_orig_bear) and not na(impulse_bot_bear)) ? impulse_orig_bear - impulse_bot_bear : na
+f05_bear   = not na(imp_r_bear) ? impulse_bot_bear + 0.500 * imp_r_bear : na
+f618_bear  = not na(imp_r_bear) ? impulse_bot_bear + 0.618 * imp_r_bear : na
+f786_bear  = not na(imp_r_bear) ? impulse_bot_bear + 0.786 * imp_r_bear : na
+f1272_bear = not na(imp_r_bear) ? impulse_bot_bear - 0.272 * imp_r_bear : na
+f1618_bear = not na(imp_r_bear) ? impulse_bot_bear - 0.618 * imp_r_bear : na
+f2000_bear = not na(imp_r_bear) ? impulse_bot_bear - 1.000 * imp_r_bear : na
+
+// Invalidation: price through 0.786
 if state == 1 or state == 2
-    invPrice = f_fibRetrace(i_invalidation, swingStartPrice, swingEndPrice, setupDir)
-    // Invalidation
-    invalidated = false
-    if setupDir == 1 and close < invPrice - atr14 * i_slBufferATR
-        invalidated := true
-    if setupDir == -1 and close > invPrice + atr14 * i_slBufferATR
-        invalidated := true
-    // Timeout
-    if bar_index - impulseEndBar > i_maxRetraceBars
-        invalidated := true
-    // Messy retrace filter
-    beyondCount = 0
-    lookLen = math.min(bar_index - impulseEndBar, 200)
-    if lookLen > 0
-        for k = 0 to lookLen - 1
-            if setupDir == 1 and close[k] < emaFast[k]
-                beyondCount += 1
-            if setupDir == -1 and close[k] > emaFast[k]
-                beyondCount += 1
-    if beyondCount > i_maxBeyondEMA
-        invalidated := true
-
-    if invalidated
+    if direction == 1 and not na(f786_bull) and low < f786_bull
         state := 0
-    else
-        // Check fib zone touch
-        fibZoneA = f_fibRetrace(i_fibMin, swingStartPrice, swingEndPrice, setupDir)
-        fibZoneB = f_fibRetrace(i_fibMax, swingStartPrice, swingEndPrice, setupDir)
-        zLow = math.min(fibZoneA, fibZoneB)
-        zHigh = math.max(fibZoneA, fibZoneB)
-
-        if state == 1
-            touchPrice = setupDir == 1 ? low : high
-            if touchPrice >= zLow and touchPrice <= zHigh
-                retraceTouchBar := bar_index
-                state := 2
-
-        // Check entry pivot formation (after zone touch)
-        if state == 2
-            if setupDir == 1 and not na(entryPivotHigh)
-                pivotBar = bar_index - i_entryRight
-                if pivotBar > retraceTouchBar
-                    entryBreakLevel := high[i_entryRight] + atr14 * 0.05
-                    state := 3
-            if setupDir == -1 and not na(entryPivotLow)
-                pivotBar = bar_index - i_entryRight
-                if pivotBar > retraceTouchBar
-                    entryBreakLevel := low[i_entryRight] - atr14 * 0.05
-                    state := 3
-
-// ARMED → ENTRY
-if state == 3
-    // Check invalidation still
-    invPrice = f_fibRetrace(i_invalidation, swingStartPrice, swingEndPrice, setupDir)
-    if (setupDir == 1 and close < invPrice) or (setupDir == -1 and close > invPrice)
+    if direction == -1 and not na(f786_bear) and high > f786_bear
         state := 0
-    else if bar_index - impulseEndBar > i_maxRetraceBars + 20
-        state := 0
-    else
-        triggered = false
-        if setupDir == 1 and close > entryBreakLevel and inSession
-            triggered := true
-        if setupDir == -1 and close < entryBreakLevel and inSession
-            triggered := true
 
-        if triggered
-            // Distance check
-            fibZoneA = f_fibRetrace(i_fibMin, swingStartPrice, swingEndPrice, setupDir)
-            fibZoneB = f_fibRetrace(i_fibMax, swingStartPrice, swingEndPrice, setupDir)
-            zoneMid = (fibZoneA + fibZoneB) / 2
-            dist = math.abs(close - zoneMid)
-            if dist <= atr14 * i_maxEntryDist
-                // Compute SL/TP
-                fibTarget = f_fibExtension(i_fibTarget, swingStartPrice, swingEndPrice, setupDir)
+// BOS Detected -> In Golden Pocket (Armed)
+if state == 1
+    if direction == 1 and not na(f618_bull) and not na(f05_bull) and low <= f05_bull and close >= f618_bull
+        state := 2
+    if direction == -1 and not na(f618_bear) and not na(f05_bear) and high >= f05_bear and close <= f618_bear
+        state := 2
 
-                if setupDir == 1
-                    anchor = math.min(swingStartPrice, f_fibRetrace(i_invalidation, swingStartPrice, swingEndPrice, 1)) - atr14 * i_slBufferATR
-                    baseSL = close - anchor
-                    atrSL  = atr14 * i_slATRMult * slVolMult
-                    slDist = math.max(baseSL, atrSL)
-                    baseTP = fibTarget - close
-                    atrTP  = atr14 * i_tpATRMult * tpVolMult
-                    tpDist = math.max(baseTP, atrTP)
+// ── SIGNALS ──────────────────────────────────────────────────
+longSignal  = state == 2 and direction == 1  and close > open
+shortSignal = state == 2 and direction == -1 and close < open
 
-                    buySL_price  := close - slDist
-                    buyTP_price  := close + tpDist
-                    buySignal    := true
+// After signal, reset state
+if longSignal or shortSignal
+    state := 0
 
-                if setupDir == -1
-                    anchor = math.max(swingStartPrice, f_fibRetrace(i_invalidation, swingStartPrice, swingEndPrice, -1)) + atr14 * i_slBufferATR
-                    baseSL = anchor - close
-                    atrSL  = atr14 * i_slATRMult * slVolMult
-                    slDist = math.max(baseSL, atrSL)
-                    baseTP = close - fibTarget
-                    atrTP  = atr14 * i_tpATRMult * tpVolMult
-                    tpDist = math.max(baseTP, atrTP)
-
-                    sellSL_price := close + slDist
-                    sellTP_price := close - tpDist
-                    sellSignal   := true
-
-                state := 0
-                cooldownUntil := bar_index + 10
-            else
-                state := 0
+// ── SL / TP ─────────────────────────────────────────────────
+long_sl   = direction == 1  ? (not na(f786_bull) ? f786_bull - syminfo.mintick * 10 : na) : na
+long_tp1  = f1272_bull
+long_tp2  = f1618_bull
+long_tp3  = f2000_bull
+short_sl  = direction == -1 ? (not na(f786_bear) ? f786_bear + syminfo.mintick * 10 : na) : na
+short_tp1 = f1272_bear
+short_tp2 = f1618_bear
+short_tp3 = f2000_bear
 
 // ── VISUALS ──────────────────────────────────────────────────
-plot(emaFast, "EMA Fast", color.blue, 1)
-plot(emaSlow, "EMA Slow", color.orange, 1)
-plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
-plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)
+// EMA lines
+plot(ema_fast, "EMA Fast", color.blue, 1)
+plot(ema_slow, "EMA Slow", color.orange, 1)
 
-// Fib zone visualization
-fibZoneA_plot = state >= 1 ? f_fibRetrace(i_fibMin, swingStartPrice, swingEndPrice, setupDir) : na
-fibZoneB_plot = state >= 1 ? f_fibRetrace(i_fibMax, swingStartPrice, swingEndPrice, setupDir) : na
-p1 = plot(fibZoneA_plot, "Fib Zone A", color.new(color.purple, 80), display=display.none)
-p2 = plot(fibZoneB_plot, "Fib Zone B", color.new(color.purple, 80), display=display.none)
-fill(p1, p2, color.new(color.purple, 90), title="Fib Zone")
+// Entry signals
+plotshape(longSignal,  "Long",  shape.triangleup,   location.belowbar, color.green, size=size.normal)
+plotshape(shortSignal, "Short", shape.triangledown,  location.abovebar, color.red,   size=size.normal)
+
+// Fib level plots (only when active setup exists)
+show_bull_fibs = inp_show_fibs and state >= 1 and direction == 1
+show_bear_fibs = inp_show_fibs and state >= 1 and direction == -1
+
+// Bull fib levels
+plot(show_bull_fibs ? f05_bull   : na, "Bull 0.500",  color.new(color.yellow, 30), 1, plot.style_circles)
+plot(show_bull_fibs ? f618_bull  : na, "Bull 0.618",  color.new(color.orange, 30), 1, plot.style_circles)
+plot(show_bull_fibs ? f786_bull  : na, "Bull 0.786",  color.new(color.red, 30),    1, plot.style_circles)
+plot(show_bull_fibs ? f1272_bull : na, "Bull 1.272",  color.new(color.lime, 30),   1, plot.style_cross)
+plot(show_bull_fibs ? f1618_bull : na, "Bull 1.618",  color.new(color.green, 30),  1, plot.style_cross)
+plot(show_bull_fibs ? f2000_bull : na, "Bull 2.000",  color.new(color.teal, 30),   1, plot.style_cross)
+
+// Bear fib levels
+plot(show_bear_fibs ? f05_bear   : na, "Bear 0.500",  color.new(color.yellow, 30), 1, plot.style_circles)
+plot(show_bear_fibs ? f618_bear  : na, "Bear 0.618",  color.new(color.orange, 30), 1, plot.style_circles)
+plot(show_bear_fibs ? f786_bear  : na, "Bear 0.786",  color.new(color.red, 30),    1, plot.style_circles)
+plot(show_bear_fibs ? f1272_bear : na, "Bear 1.272",  color.new(color.lime, 30),   1, plot.style_cross)
+plot(show_bear_fibs ? f1618_bear : na, "Bear 1.618",  color.new(color.green, 30),  1, plot.style_cross)
+plot(show_bear_fibs ? f2000_bear : na, "Bear 2.000",  color.new(color.teal, 30),   1, plot.style_cross)
+
+// Golden pocket fill
+gp_top = show_bull_fibs ? f05_bull : show_bear_fibs ? f05_bear : na
+gp_bot = show_bull_fibs ? f618_bull : show_bear_fibs ? f618_bear : na
+p_gp1 = plot(gp_top, "GP Top", color.new(color.purple, 80), display=display.none)
+p_gp2 = plot(gp_bot, "GP Bot", color.new(color.purple, 80), display=display.none)
+fill(p_gp1, p_gp2, color.new(color.purple, 85), title="Golden Pocket Zone")
+
+// Background color when in golden pocket
+bgcolor(state == 2 and direction == 1  ? color.new(color.green, 92) : na, title="Bull GP Active")
+bgcolor(state == 2 and direction == -1 ? color.new(color.red, 92)   : na, title="Bear GP Active")
 
 // TP/SL lines on signal
-if buySignal
-    line.new(bar_index, buyTP_price, bar_index + 20, buyTP_price, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
-    line.new(bar_index, buySL_price, bar_index + 20, buySL_price, color=color.new(color.red, 30), width=2, style=line.style_dashed)
-    label.new(bar_index, buyTP_price, "TP", color=color.new(color.lime, 30), textcolor=color.white, size=size.tiny)
-    label.new(bar_index, buySL_price, "SL", color=color.new(color.red, 30), textcolor=color.white, size=size.tiny)
+if longSignal
+    line.new(bar_index, long_sl,  bar_index + 20, long_sl,  color=color.new(color.red, 30),  width=2, style=line.style_dashed)
+    line.new(bar_index, long_tp1, bar_index + 20, long_tp1, color=color.new(color.lime, 30), width=1, style=line.style_dashed)
+    line.new(bar_index, long_tp2, bar_index + 20, long_tp2, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
+    line.new(bar_index, long_tp3, bar_index + 20, long_tp3, color=color.new(color.lime, 30), width=1, style=line.style_dotted)
+    label.new(bar_index, long_sl,  "SL",  color=color.new(color.red, 30),  textcolor=color.white, size=size.tiny)
+    label.new(bar_index, long_tp1, "TP1", color=color.new(color.lime, 30), textcolor=color.white, size=size.tiny)
+    label.new(bar_index, long_tp2, "TP2", color=color.new(color.lime, 30), textcolor=color.white, size=size.tiny)
+    label.new(bar_index, long_tp3, "TP3", color=color.new(color.lime, 30), textcolor=color.white, size=size.tiny)
 
-if sellSignal
-    line.new(bar_index, sellTP_price, bar_index + 20, sellTP_price, color=color.new(color.red, 30), width=2, style=line.style_dashed)
-    line.new(bar_index, sellSL_price, bar_index + 20, sellSL_price, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
-    label.new(bar_index, sellTP_price, "TP", color=color.new(color.red, 30), textcolor=color.white, size=size.tiny)
-    label.new(bar_index, sellSL_price, "SL", color=color.new(color.lime, 30), textcolor=color.white, size=size.tiny)
+if shortSignal
+    line.new(bar_index, short_sl,  bar_index + 20, short_sl,  color=color.new(color.red, 30),  width=2, style=line.style_dashed)
+    line.new(bar_index, short_tp1, bar_index + 20, short_tp1, color=color.new(color.lime, 30), width=1, style=line.style_dashed)
+    line.new(bar_index, short_tp2, bar_index + 20, short_tp2, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
+    line.new(bar_index, short_tp3, bar_index + 20, short_tp3, color=color.new(color.lime, 30), width=1, style=line.style_dotted)
+    label.new(bar_index, short_sl,  "SL",  color=color.new(color.red, 30),  textcolor=color.white, size=size.tiny)
+    label.new(bar_index, short_tp1, "TP1", color=color.new(color.lime, 30), textcolor=color.white, size=size.tiny)
+    label.new(bar_index, short_tp2, "TP2", color=color.new(color.lime, 30), textcolor=color.white, size=size.tiny)
+    label.new(bar_index, short_tp3, "TP3", color=color.new(color.lime, 30), textcolor=color.white, size=size.tiny)
 
-// State indicator
-stateColor = state == 0 ? color.gray : state == 1 ? color.yellow : state == 2 ? color.orange : color.lime
+// State diamond indicator
+stateColor = state == 0 ? color.gray : state == 1 ? color.yellow : color.lime
 plotshape(state > 0, "State Active", shape.diamond, location.bottom, stateColor, size=size.tiny)
 
-// Info table
-var table tbl = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80), border_width=1)
-if barstate.islast
-    table.cell(tbl, 0, 0, "FB Razor", text_color=color.white, text_size=size.small)
-    table.cell(tbl, 1, 0, "Swing", text_color=color.yellow, text_size=size.small)
+// ── STATE TABLE ──────────────────────────────────────────────
+var table tbl = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast and inp_show_state
+    table.cell(tbl, 0, 0, "FB-Razor BOS", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, "v2.0",         text_color=color.yellow, text_size=size.small)
+
     table.cell(tbl, 0, 1, "State", text_color=color.gray, text_size=size.tiny)
-    stateStr = state == 0 ? "Idle" : state == 1 ? "Impulse" : state == 2 ? "Retracing" : "Armed"
+    stateStr = state == 0 ? "Idle" : state == 1 ? "BOS Detected" : "Armed (GP)"
     table.cell(tbl, 1, 1, stateStr, text_color=stateColor, text_size=size.tiny)
-    table.cell(tbl, 0, 2, "Trend", text_color=color.gray, text_size=size.tiny)
-    table.cell(tbl, 1, 2, bullTrend ? "BULL" : bearTrend ? "BEAR" : "FLAT", text_color=bullTrend ? color.lime : bearTrend ? color.red : color.gray, text_size=size.tiny)
-    table.cell(tbl, 0, 3, "Vol Regime", text_color=color.gray, text_size=size.tiny)
-    table.cell(tbl, 1, 3, str.tostring(volRatio, "#.##"), text_color=color.white, text_size=size.tiny)
-    table.cell(tbl, 0, 4, "Direction", text_color=color.gray, text_size=size.tiny)
-    table.cell(tbl, 1, 4, setupDir == 1 ? "LONG" : setupDir == -1 ? "SHORT" : "NONE", text_color=setupDir == 1 ? color.lime : setupDir == -1 ? color.red : color.gray, text_size=size.tiny)
-    table.cell(tbl, 0, 5, "EQH/EQL", text_color=color.gray, text_size=size.tiny)
-    table.cell(tbl, 1, 5, i_enableEQHL ? "ON" : "OFF", text_color=i_enableEQHL ? color.lime : color.gray, text_size=size.tiny)
+
+    table.cell(tbl, 0, 2, "Direction", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 2, direction == 1 ? "BULL" : direction == -1 ? "BEAR" : "NONE", text_color=direction == 1 ? color.lime : direction == -1 ? color.red : color.gray, text_size=size.tiny)
+
+    table.cell(tbl, 0, 3, "Impulse Range", text_color=color.gray, text_size=size.tiny)
+    imp_disp = direction == 1 ? imp_r_bull : direction == -1 ? imp_r_bear : na
+    table.cell(tbl, 1, 3, not na(imp_disp) ? str.tostring(imp_disp, "#.#####") : "N/A", text_color=color.white, text_size=size.tiny)
+
+    table.cell(tbl, 0, 4, "ATR", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 4, str.tostring(atr, "#.#####"), text_color=color.white, text_size=size.tiny)
+
+    table.cell(tbl, 0, 5, "Trend", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 5, trend_bull ? "BULL" : trend_bear ? "BEAR" : "FLAT", text_color=trend_bull ? color.lime : trend_bear ? color.red : color.gray, text_size=size.tiny)
+
+    table.cell(tbl, 0, 6, "EMA Filter", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 6, inp_require_ema ? "ON" : "OFF", text_color=inp_require_ema ? color.lime : color.gray, text_size=size.tiny)

@@ -1,15 +1,12 @@
 //@version=5
-indicator("ABC Ulti V2", shorttitle="ABCUltiV2", overlay=true, max_labels_count=500, max_lines_count=500, max_bars_back=5000)
+indicator("ABC Ulti V2 [BOS+Fib Enhanced]", shorttitle="ABCUltiV2", overlay=true, max_labels_count=500, max_lines_count=500, max_bars_back=5000)
 
 // ── INPUTS ───────────────────────────────────────────────────
 i_zigzagLen    = input.int(10,    "Zigzag Sensitivity",  group="Pattern", minval=2)
-i_minRet       = input.float(0.236,"Min BC Retrace",     group="Pattern", step=0.01)
-i_maxRet       = input.float(0.886,"Max BC Retrace",     group="Pattern", step=0.01)
+i_minRet       = input.float(0.382,"Min B Retrace",      group="Pattern", step=0.01)
+i_maxRet       = input.float(0.786,"Max B Retrace",      group="Pattern", step=0.01)
 i_maxPatterns  = input.int(3,      "Max Patterns",       group="Pattern", minval=1, maxval=5)
-i_fibExt1      = input.float(1.618,"Fib Extension T1",   group="Targets", step=0.01)
-i_fibExt2      = input.float(1.809,"Fib Extension T2",   group="Targets", step=0.01)
-i_fibExt3      = input.float(2.0,  "Fib Extension T3",   group="Targets", step=0.01)
-i_invLevel     = input.float(0.886,"Invalidation Level",  group="Targets", step=0.01)
+i_showFibs     = input.bool(true,  "Show Fib Levels",    group="Visual")
 i_lineColor    = input.color(color.gray, "ABC Line Color", group="Visual")
 i_lineWidth    = input.int(2,      "Line Width",          group="Visual", minval=1, maxval=4)
 i_showSR       = input.bool(true,  "Show S/R Lines",      group="S/R")
@@ -20,28 +17,22 @@ i_resLines     = input.int(3,      "Resistance Lines",    group="S/R", minval=0,
 
 // ── Webhook / MT5 ────────────────────────────────────────────
 wh_enable     = input.bool(true,   "Enable Webhook Alerts", group="Webhook / MT5")
-wh_atrLen     = input.int(14,      "Webhook ATR Length",    group="Webhook / MT5", minval=1)
-wh_tpMult     = input.float(2.0,   "Webhook TP Mult",      group="Webhook / MT5", step=0.1)
-wh_slMult     = input.float(1.5,   "Webhook SL Mult",      group="Webhook / MT5", step=0.1)
 wh_showLines  = input.bool(true,   "Show Webhook TP/SL",   group="Webhook / MT5")
 
-// ── ZIGZAG (inline replacement for Trendoscope library) ──────
+// ── ZIGZAG ENGINE (inline) ───────────────────────────────────
 var float[] zigPrices  = array.new_float(0)
 var int[]   zigBars    = array.new_int(0)
-var int[]   zigDirs    = array.new_int(0)  // 1=high, -1=low
+var int[]   zigDirs    = array.new_int(0)
 var int     zigDir     = 0
-
-// Track current swing
-var float curHigh  = high
-var float curLow   = low
-var int   curHighB = bar_index
-var int   curLowB  = bar_index
+var float   curHigh    = high
+var float   curLow     = low
+var int     curHighB   = bar_index
+var int     curLowB    = bar_index
 
 isHighest = high == ta.highest(high, i_zigzagLen)
-isLowest  = low == ta.lowest(low, i_zigzagLen)
+isLowest  = low  == ta.lowest(low, i_zigzagLen)
 
-// Zigzag detection
-newPivot = false
+newPivot   = false
 pivotPrice = 0.0
 pivotBar   = 0
 pivotDir   = 0
@@ -86,25 +77,27 @@ if newPivot
     else
         curLow  := low
         curLowB := bar_index
-    // Trim
     while array.size(zigPrices) > 50
         array.pop(zigPrices)
         array.pop(zigBars)
         array.pop(zigDirs)
 
-// ── ABC PATTERN DETECTION ────────────────────────────────────
-var bool buySignal  = false
-var bool sellSignal = false
-var float buyTP     = na
-var float buySL     = na
-var float sellTP    = na
-var float sellSL    = na
+// ── ABC + BOS PATTERN DETECTION ──────────────────────────────
+var bool  buySignal  = false
+var bool  sellSignal = false
+var float buyTP      = na
+var float buySL      = na
+var float sellTP     = na
+var float sellSL     = na
+var float gpTop      = na
+var float gpBot      = na
+var int   gpDir      = 0
+var string lastABCPoint = ""
 
 buySignal  := false
 sellSignal := false
 
 if newPivot and array.size(zigPrices) >= 4
-    // Most recent 3 pivots form potential ABC
     cPrice = array.get(zigPrices, 0)
     bPrice = array.get(zigPrices, 1)
     aPrice = array.get(zigPrices, 2)
@@ -112,55 +105,76 @@ if newPivot and array.size(zigPrices) >= 4
     bBar   = array.get(zigBars, 1)
     aBar   = array.get(zigBars, 2)
     cDir   = array.get(zigDirs, 0)
-
     abRange = math.abs(bPrice - aPrice)
 
     if abRange > 0
-        bcRetrace = math.abs(cPrice - bPrice) / abRange
+        // --- BULLISH ABC + BOS ---
+        if cDir == -1 and bPrice > aPrice and cPrice < aPrice
+            acRange = math.abs(aPrice - cPrice)
+            fib50   = cPrice + acRange * 0.5
+            fib618  = cPrice + acRange * 0.618
+            fib786  = cPrice + acRange * 0.786
+            ext1272 = cPrice + acRange * 1.272
+            ext1618 = cPrice + acRange * 1.618
+            ext200  = cPrice + acRange * 2.0
 
-        if bcRetrace >= i_minRet and bcRetrace <= i_maxRet
-            // Bullish ABC: A=low, B=high, C=low (higher low)
-            if cDir == -1 and bPrice > aPrice and cPrice > aPrice and cPrice < bPrice
-                // Targets via Fib extension
-                t1 = cPrice + abRange * i_fibExt1
-                t2 = cPrice + abRange * i_fibExt2
-                t3 = cPrice + abRange * i_fibExt3
-                inv = cPrice - abRange * (i_invLevel - 0.5)
+            buyTP      := ext1618
+            buySL      := cPrice - acRange * 0.786
+            buySignal  := true
+            lastABCPoint := "C_BOS_BULL"
+            gpTop := fib618
+            gpBot := fib50
+            gpDir := 1
 
-                buyTP      := t1
-                buySL      := math.min(aPrice, inv)
-                buySignal  := true
+            line.new(aBar, aPrice, bBar, bPrice, color=i_lineColor, width=i_lineWidth)
+            line.new(bBar, bPrice, cBar, cPrice, color=i_lineColor, width=i_lineWidth)
+            label.new(aBar, aPrice, "A", color=color.new(color.blue, 80), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+            label.new(bBar, bPrice, "B", color=color.new(color.blue, 80), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+            label.new(cBar, cPrice, "C\nBOS", color=color.new(color.lime, 60), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+            label.new(cBar + 5, fib618, "D Zone", color=color.new(color.orange, 60), textcolor=color.white, style=label.style_label_left, size=size.tiny)
 
-                // Draw pattern
-                line.new(aBar, aPrice, bBar, bPrice, color=i_lineColor, width=i_lineWidth)
-                line.new(bBar, bPrice, cBar, cPrice, color=i_lineColor, width=i_lineWidth)
-                label.new(aBar, aPrice, "A", color=color.new(color.blue, 80), textcolor=color.white, style=label.style_label_up, size=size.tiny)
-                label.new(bBar, bPrice, "B", color=color.new(color.blue, 80), textcolor=color.white, style=label.style_label_down, size=size.tiny)
-                label.new(cBar, cPrice, "C", color=color.new(color.lime, 80), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+            if i_showFibs
+                int fibLen = 40
+                line.new(cBar, fib50,  cBar + fibLen, fib50,  color=color.new(#FFD700, 30), width=1, style=line.style_dashed)
+                line.new(cBar, fib618, cBar + fibLen, fib618, color=color.new(color.green, 30), width=1, style=line.style_dashed)
+                line.new(cBar, fib786, cBar + fibLen, fib786, color=color.new(color.red, 30), width=1, style=line.style_dashed)
+                line.new(cBar, ext1272, cBar + fibLen, ext1272, color=color.new(color.blue, 30), width=1, style=line.style_dashed)
+                line.new(cBar, ext1618, cBar + fibLen, ext1618, color=color.new(color.blue, 30), width=1, style=line.style_dashed)
+                line.new(cBar, ext200,  cBar + fibLen, ext200,  color=color.new(color.blue, 30), width=1, style=line.style_dashed)
 
-                // Target zone
-                line.new(cBar, t1, cBar + 30, t1, color=color.new(color.lime, 50), width=1, style=line.style_dashed)
-                label.new(cBar + 15, t1, "T1", color=color.new(color.lime, 80), textcolor=color.white, size=size.tiny)
+        // --- BEARISH ABC + BOS ---
+        if cDir == 1 and bPrice < aPrice and cPrice > aPrice
+            acRange = math.abs(cPrice - aPrice)
+            fib50   = cPrice - acRange * 0.5
+            fib618  = cPrice - acRange * 0.618
+            fib786  = cPrice - acRange * 0.786
+            ext1272 = cPrice - acRange * 1.272
+            ext1618 = cPrice - acRange * 1.618
+            ext200  = cPrice - acRange * 2.0
 
-            // Bearish ABC: A=high, B=low, C=high (lower high)
-            if cDir == 1 and bPrice < aPrice and cPrice < aPrice and cPrice > bPrice
-                t1 = cPrice - abRange * i_fibExt1
-                t2 = cPrice - abRange * i_fibExt2
-                t3 = cPrice - abRange * i_fibExt3
-                inv = cPrice + abRange * (i_invLevel - 0.5)
+            sellTP     := ext1618
+            sellSL     := cPrice + acRange * 0.786
+            sellSignal := true
+            lastABCPoint := "C_BOS_BEAR"
+            gpTop := fib50
+            gpBot := fib618
+            gpDir := -1
 
-                sellTP     := t1
-                sellSL     := math.max(aPrice, inv)
-                sellSignal := true
+            line.new(aBar, aPrice, bBar, bPrice, color=i_lineColor, width=i_lineWidth)
+            line.new(bBar, bPrice, cBar, cPrice, color=i_lineColor, width=i_lineWidth)
+            label.new(aBar, aPrice, "A", color=color.new(color.blue, 80), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+            label.new(bBar, bPrice, "B", color=color.new(color.blue, 80), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+            label.new(cBar, cPrice, "C\nBOS", color=color.new(color.red, 60), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+            label.new(cBar + 5, fib618, "D Zone", color=color.new(color.orange, 60), textcolor=color.white, style=label.style_label_left, size=size.tiny)
 
-                line.new(aBar, aPrice, bBar, bPrice, color=i_lineColor, width=i_lineWidth)
-                line.new(bBar, bPrice, cBar, cPrice, color=i_lineColor, width=i_lineWidth)
-                label.new(aBar, aPrice, "A", color=color.new(color.blue, 80), textcolor=color.white, style=label.style_label_down, size=size.tiny)
-                label.new(bBar, bPrice, "B", color=color.new(color.blue, 80), textcolor=color.white, style=label.style_label_up, size=size.tiny)
-                label.new(cBar, cPrice, "C", color=color.new(color.red, 80), textcolor=color.white, style=label.style_label_down, size=size.tiny)
-
-                line.new(cBar, t1, cBar + 30, t1, color=color.new(color.red, 50), width=1, style=line.style_dashed)
-                label.new(cBar + 15, t1, "T1", color=color.new(color.red, 80), textcolor=color.white, size=size.tiny)
+            if i_showFibs
+                int fibLen = 40
+                line.new(cBar, fib50,  cBar + fibLen, fib50,  color=color.new(#FFD700, 30), width=1, style=line.style_dashed)
+                line.new(cBar, fib618, cBar + fibLen, fib618, color=color.new(color.green, 30), width=1, style=line.style_dashed)
+                line.new(cBar, fib786, cBar + fibLen, fib786, color=color.new(color.red, 30), width=1, style=line.style_dashed)
+                line.new(cBar, ext1272, cBar + fibLen, ext1272, color=color.new(color.blue, 30), width=1, style=line.style_dashed)
+                line.new(cBar, ext1618, cBar + fibLen, ext1618, color=color.new(color.blue, 30), width=1, style=line.style_dashed)
+                line.new(cBar, ext200,  cBar + fibLen, ext200,  color=color.new(color.blue, 30), width=1, style=line.style_dashed)
 
 // ── S/R LEVELS ───────────────────────────────────────────────
 pivHigh = ta.pivothigh(i_srBasis == "Wicks" ? high : math.max(open, close), i_srStrength, i_srStrength)
@@ -183,50 +197,47 @@ if not na(pivLow) and i_showSR
 plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
 plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)
 
+inGoldenPocket = (gpDir == 1 and close >= gpBot and close <= gpTop) or (gpDir == -1 and close <= gpTop and close >= gpBot)
+bgcolor(inGoldenPocket ? color.new(color.orange, 90) : na, title="Golden Pocket Zone")
+
 // Info table
-var table tbl = table.new(position.top_right, 2, 3, bgcolor=color.new(color.black, 80), border_width=1)
+var table tbl = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 80), border_width=1)
 if barstate.islast
     table.cell(tbl, 0, 0, "ABC Ulti V2", text_color=color.white, text_size=size.small)
-    table.cell(tbl, 1, 0, "Zigzag: " + str.tostring(i_zigzagLen), text_color=color.yellow, text_size=size.small)
-    table.cell(tbl, 0, 1, "Pivots", text_color=color.gray, text_size=size.tiny)
-    table.cell(tbl, 1, 1, str.tostring(array.size(zigPrices)), text_color=color.white, text_size=size.tiny)
-    table.cell(tbl, 0, 2, "BC Range", text_color=color.gray, text_size=size.tiny)
-    table.cell(tbl, 1, 2, str.tostring(i_minRet, "#.###") + " - " + str.tostring(i_maxRet, "#.###"), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 0, "BOS+Fib Enhanced", text_color=color.yellow, text_size=size.small)
+    table.cell(tbl, 0, 1, "Zigzag", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 1, str.tostring(i_zigzagLen), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 2, "Pivots", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 2, str.tostring(array.size(zigPrices)), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 3, "Mode", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 3, "BOS Confirm", text_color=color.orange, text_size=size.tiny)
 
-// ── WEBHOOK ENHANCEMENT ──────────────────────────────────────
-wh_atr = ta.atr(wh_atrLen)
-
-// Use existing indicator TP/SL prices
-wh_buyTP  = buySignal  ? buyTP  : na
-wh_buySL  = buySignal  ? buySL  : na
-wh_sellTP = sellSignal ? sellTP : na
-wh_sellSL = sellSignal ? sellSL : na
-
+// ── WEBHOOK / ALERT ENHANCEMENT ──────────────────────────────
 wh_buyRR  = buySignal  and buySL < close ? str.tostring(math.round((buyTP - close) / (close - buySL), 2)) : "0"
 wh_sellRR = sellSignal and sellSL > close ? str.tostring(math.round((close - sellTP) / (sellSL - close), 2)) : "0"
 
 // Alert conditions
-alertcondition(buySignal,  title="ABCUltiV2 BUY",  message="ABCUltiV2 BUY signal")
-alertcondition(sellSignal, title="ABCUltiV2 SELL", message="ABCUltiV2 SELL signal")
+alertcondition(buySignal,  title="ABCUltiV2 BUY",  message="ABCUltiV2 BOS BUY signal")
+alertcondition(sellSignal, title="ABCUltiV2 SELL", message="ABCUltiV2 BOS SELL signal")
 
-// Webhook JSON alerts
+// Webhook JSON alerts with abc_point info
 if wh_enable and buySignal
-    wh_msg = '{"indicator_id":"ABCUltiV2","strategy_id":"abc_ulti_v2","symbol":"' + syminfo.ticker + '","action":"BUY","risk":1.0,"meta":{"tp":' + str.tostring(wh_buyTP, "#.#####") + ',"sl":' + str.tostring(wh_buySL, "#.#####") + ',"rr":"' + wh_buyRR + ':1"}}'
+    wh_msg = '{"indicator_id":"ABCUltiV2","strategy_id":"abc_ulti_v2","symbol":"' + syminfo.ticker + '","action":"BUY","abc_point":"' + lastABCPoint + '","bos":true,"risk":1.0,"meta":{"tp":' + str.tostring(buyTP, "#.#####") + ',"sl":' + str.tostring(buySL, "#.#####") + ',"rr":"' + wh_buyRR + ':1","fib_entry":"golden_pocket_0.5_0.618"}}'
     alert(wh_msg, alert.freq_once_per_bar_close)
 
 if wh_enable and sellSignal
-    wh_msg = '{"indicator_id":"ABCUltiV2","strategy_id":"abc_ulti_v2","symbol":"' + syminfo.ticker + '","action":"SELL","risk":1.0,"meta":{"tp":' + str.tostring(wh_sellTP, "#.#####") + ',"sl":' + str.tostring(wh_sellSL, "#.#####") + ',"rr":"' + wh_sellRR + ':1"}}'
+    wh_msg = '{"indicator_id":"ABCUltiV2","strategy_id":"abc_ulti_v2","symbol":"' + syminfo.ticker + '","action":"SELL","abc_point":"' + lastABCPoint + '","bos":true,"risk":1.0,"meta":{"tp":' + str.tostring(sellTP, "#.#####") + ',"sl":' + str.tostring(sellSL, "#.#####") + ',"rr":"' + wh_sellRR + ':1","fib_entry":"golden_pocket_0.5_0.618"}}'
     alert(wh_msg, alert.freq_once_per_bar_close)
 
 // Webhook TP/SL chart lines
 if wh_showLines and wh_enable and buySignal
-    line.new(bar_index, wh_buyTP, bar_index + 25, wh_buyTP, color=color.new(color.teal, 20), width=1, style=line.style_dotted)
-    line.new(bar_index, wh_buySL, bar_index + 25, wh_buySL, color=color.new(color.maroon, 20), width=1, style=line.style_dotted)
-    label.new(bar_index + 25, wh_buyTP, "WH-TP", color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
-    label.new(bar_index + 25, wh_buySL, "WH-SL", color=color.new(color.maroon, 20), textcolor=color.white, size=size.tiny)
+    line.new(bar_index, buyTP, bar_index + 25, buyTP, color=color.new(color.teal, 20), width=1, style=line.style_dotted)
+    line.new(bar_index, buySL, bar_index + 25, buySL, color=color.new(color.maroon, 20), width=1, style=line.style_dotted)
+    label.new(bar_index + 25, buyTP, "WH-TP", color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
+    label.new(bar_index + 25, buySL, "WH-SL", color=color.new(color.maroon, 20), textcolor=color.white, size=size.tiny)
 
 if wh_showLines and wh_enable and sellSignal
-    line.new(bar_index, wh_sellTP, bar_index + 25, wh_sellTP, color=color.new(color.teal, 20), width=1, style=line.style_dotted)
-    line.new(bar_index, wh_sellSL, bar_index + 25, wh_sellSL, color=color.new(color.maroon, 20), width=1, style=line.style_dotted)
-    label.new(bar_index + 25, wh_sellTP, "WH-TP", color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
-    label.new(bar_index + 25, wh_sellSL, "WH-SL", color=color.new(color.maroon, 20), textcolor=color.white, size=size.tiny)
+    line.new(bar_index, sellTP, bar_index + 25, sellTP, color=color.new(color.teal, 20), width=1, style=line.style_dotted)
+    line.new(bar_index, sellSL, bar_index + 25, sellSL, color=color.new(color.maroon, 20), width=1, style=line.style_dotted)
+    label.new(bar_index + 25, sellTP, "WH-TP", color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
+    label.new(bar_index + 25, sellSL, "WH-SL", color=color.new(color.maroon, 20), textcolor=color.white, size=size.tiny)

@@ -1,70 +1,126 @@
 //@version=5
-strategy("SMP1 Fib EMA Simple [Strategy]", shorttitle="SMP1_strat", overlay=true,
-         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+strategy("SMP1 Updated - BOS Fib Simple [Strategy]", shorttitle="SMP1_upd_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=10,
          initial_capital=10000, commission_type=strategy.commission.cash_per_order,
          commission_value=0, slippage=2, pyramiding=0,
          calc_on_every_tick=false, process_orders_on_close=true)
 
-// ── INPUTS ───────────────────────────────────────────────────
-i_emaFast       = input.int(50,    "EMA Fast Period",          group="Signal", minval=5)
-i_emaSlow       = input.int(200,   "EMA Slow Period",          group="Signal", minval=20)
-i_atrPeriod     = input.int(14,    "ATR Period",               group="Signal", minval=1)
-i_swingLookback = input.int(15,    "Swing Lookback Bars",      group="Signal", minval=3)
-i_minImpulseATR = input.float(0.8, "Min Impulse (ATR mult)",   group="Signal", minval=0.1, step=0.1)
-i_impulseBody   = input.float(0.4, "Min Body (ATR mult)",      group="Signal", minval=0.1, step=0.1)
-i_slMult        = input.float(0.8, "SL ATR Multiplier",        group="TP/SL", minval=0.1, step=0.1)
-i_tpMult        = input.float(1.5, "TP ATR Multiplier",        group="TP/SL", minval=0.1, step=0.1)
-i_useSession    = input.bool(true,  "Use Session Filter",      group="Session")
-i_sessionStart  = input.int(7,      "Session Start Hour (UTC)", group="Session", minval=0, maxval=23)
-i_sessionEnd    = input.int(21,     "Session End Hour (UTC)",   group="Session", minval=0, maxval=23)
+// ── BOS SWING INPUTS ────────────────────────────────────────
+inp_swing_left  = input.int(5,     "Swing Left Bars",          group="BOS", minval=1)
+inp_swing_right = input.int(3,     "Swing Right Bars",         group="BOS", minval=1)
+inp_fib_entry_hi = input.float(0.618, "Fib Entry High",       group="BOS", step=0.01)
+inp_fib_entry_lo = input.float(0.500, "Fib Entry Low",        group="BOS", step=0.01)
+inp_fib_invalid  = input.float(0.786, "Fib Invalidation",     group="BOS", step=0.01)
 
-// ── CALCULATIONS ─────────────────────────────────────────────
+// ── EMA TREND FILTER INPUTS ─────────────────────────────────
+i_emaFast       = input.int(50,    "EMA Fast Period",          group="Trend", minval=5)
+i_emaSlow       = input.int(200,   "EMA Slow Period",          group="Trend", minval=20)
+
+// ── SESSION INPUTS ──────────────────────────────────────────
+i_useSession    = input.bool(true, "Use Session Filter",       group="Session")
+i_sessionStart  = input.int(7,     "Session Start (UTC)",      group="Session", minval=0, maxval=23)
+i_sessionEnd    = input.int(21,    "Session End (UTC)",        group="Session", minval=0, maxval=23)
+
+// ── EMA CALCULATIONS ────────────────────────────────────────
 emaFast = ta.ema(close, i_emaFast)
 emaSlow = ta.ema(close, i_emaSlow)
-atrVal  = ta.atr(i_atrPeriod)
-
 bullishTrend = emaFast > emaSlow
 bearishTrend = emaFast < emaSlow
 
-swingHigh = ta.highest(high, i_swingLookback)
-swingLow  = ta.lowest(low, i_swingLookback)
-impulse   = swingHigh - swingLow
+// ── BOS + FIBONACCI CORE LOGIC ──────────────────────────────
+var float prevSwingHigh    = na
+var float prevSwingLow     = na
+var float impulse_lo_bull  = na
+var float impulse_hi_bull  = na
+var float impulse_hi_bear  = na
+var float impulse_lo_bear  = na
+var bool  bos_bull_active  = false
+var bool  bos_bear_active  = false
+var bool  bull_invalidated = false
+var bool  bear_invalidated = false
 
-impulseValid  = impulse >= atrVal * i_minImpulseATR
-bullishCandle = close > open and (close - open) > atrVal * i_impulseBody
-bearishCandle = close < open and (open - close) > atrVal * i_impulseBody
+swingH = ta.pivothigh(high, inp_swing_left, inp_swing_right)
+swingL = ta.pivotlow(low, inp_swing_left, inp_swing_right)
 
+if not na(swingL)
+    prevSwingLow    := swingL
+    impulse_lo_bull := swingL
+
+if not na(swingH)
+    prevSwingHigh   := swingH
+    impulse_hi_bear := swingH
+
+bosLong  = not na(prevSwingHigh) and close > prevSwingHigh and not bos_bull_active
+bosShort = not na(prevSwingLow)  and close < prevSwingLow  and not bos_bear_active
+
+if bosLong
+    impulse_hi_bull  := high
+    bos_bull_active  := true
+    bos_bear_active  := false
+    bull_invalidated := false
+    prevSwingHigh    := na
+
+if bosShort
+    impulse_lo_bear  := low
+    bos_bear_active  := true
+    bos_bull_active  := false
+    bear_invalidated := false
+    prevSwingLow     := na
+
+// ── FIBONACCI LEVELS ────────────────────────────────────────
+imp_range_bull = (not na(impulse_hi_bull) and not na(impulse_lo_bull)) ? impulse_hi_bull - impulse_lo_bull : na
+fib_0500_bull  = not na(imp_range_bull) ? impulse_hi_bull - 0.500 * imp_range_bull : na
+fib_0618_bull  = not na(imp_range_bull) ? impulse_hi_bull - 0.618 * imp_range_bull : na
+fib_0786_bull  = not na(imp_range_bull) ? impulse_hi_bull - 0.786 * imp_range_bull : na
+fib_1618_bull  = not na(imp_range_bull) ? impulse_hi_bull + 0.618 * imp_range_bull : na
+
+imp_range_bear = (not na(impulse_hi_bear) and not na(impulse_lo_bear)) ? impulse_hi_bear - impulse_lo_bear : na
+fib_0500_bear  = not na(imp_range_bear) ? impulse_lo_bear + 0.500 * imp_range_bear : na
+fib_0618_bear  = not na(imp_range_bear) ? impulse_lo_bear + 0.618 * imp_range_bear : na
+fib_0786_bear  = not na(imp_range_bear) ? impulse_lo_bear + 0.786 * imp_range_bear : na
+fib_1618_bear  = not na(imp_range_bear) ? impulse_lo_bear - 0.618 * imp_range_bear : na
+
+// ── INVALIDATION ────────────────────────────────────────────
+if bos_bull_active and not na(fib_0786_bull) and low < fib_0786_bull
+    bull_invalidated := true
+    bos_bull_active  := false
+
+if bos_bear_active and not na(fib_0786_bear) and high > fib_0786_bear
+    bear_invalidated := true
+    bos_bear_active  := false
+
+// ── GOLDEN POCKET DETECTION ─────────────────────────────────
+inPocketBull = bos_bull_active and not bull_invalidated and not na(fib_0618_bull) and low <= fib_0500_bull and close >= fib_0618_bull
+inPocketBear = bos_bear_active and not bear_invalidated and not na(fib_0618_bear) and high >= fib_0500_bear and close <= fib_0618_bear
+
+longSignal_raw  = inPocketBull and close > open
+shortSignal_raw = inPocketBear and close < open
+
+// ── TP/SL FROM FIB LEVELS ───────────────────────────────────
+long_sl  = fib_0786_bull - syminfo.mintick * 10
+long_tp2 = fib_1618_bull
+short_sl  = fib_0786_bear + syminfo.mintick * 10
+short_tp2 = fib_1618_bear
+
+// ── SESSION FILTER ──────────────────────────────────────────
 currentHour = hour(time, "UTC")
-inSession = i_useSession ? (currentHour >= i_sessionStart and currentHour <= i_sessionEnd) : true
+inSession   = i_useSession ? (currentHour >= i_sessionStart and currentHour <= i_sessionEnd) : true
 
-buyFibHi  = swingHigh - impulse * 0.50
-buyFibLo  = swingHigh - impulse * 0.618
-sellFibLo = swingLow + impulse * 0.50
-sellFibHi = swingLow + impulse * 0.618
+// ── FINAL SIGNALS (EMA trend filter only) ───────────────────
+longSignal  = longSignal_raw  and bullishTrend and inSession
+shortSignal = shortSignal_raw and bearishTrend and inSession
 
-priceInBuyZone  = close >= buyFibLo and close <= buyFibHi
-priceInSellZone = close >= sellFibLo and close <= sellFibHi
-
-// ── SIGNALS ──────────────────────────────────────────────────
-buySignal  = bullishTrend and impulseValid and bullishCandle and priceInBuyZone and inSession
-sellSignal = bearishTrend and impulseValid and bearishCandle and priceInSellZone and inSession
-
-buyTP  = swingHigh + atrVal * i_tpMult
-buySL  = swingLow - atrVal * i_slMult
-sellTP = swingLow - atrVal * i_tpMult
-sellSL = swingHigh + atrVal * i_slMult
-
-// ── STRATEGY ENTRIES ─────────────────────────────────────────
-if buySignal
+// ── STRATEGY ENTRIES ────────────────────────────────────────
+if longSignal
     strategy.entry("Long", strategy.long)
-    strategy.exit("Long Exit", "Long", stop=buySL, limit=buyTP)
+    strategy.exit("Long Exit", "Long", stop=long_sl, limit=long_tp2)
 
-if sellSignal
+if shortSignal
     strategy.entry("Short", strategy.short)
-    strategy.exit("Short Exit", "Short", stop=sellSL, limit=sellTP)
+    strategy.exit("Short Exit", "Short", stop=short_sl, limit=short_tp2)
 
-// ── VISUALS ──────────────────────────────────────────────────
-plot(emaFast, "EMA Fast", color.blue, 1)
-plot(emaSlow, "EMA Slow", color.orange, 1)
-plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
-plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)
+// ── VISUALS ─────────────────────────────────────────────────
+plot(emaFast, "EMA 50", color.blue, 1)
+plot(emaSlow, "EMA 200", color.orange, 1)
+plotshape(longSignal,  "BOS Long",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(shortSignal, "BOS Short", shape.triangledown,  location.abovebar, color.red,  size=size.small)

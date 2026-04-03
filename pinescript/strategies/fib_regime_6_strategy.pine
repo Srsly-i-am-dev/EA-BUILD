@@ -1,79 +1,139 @@
 //@version=5
-strategy("Fib Regime 6 [Strategy]", shorttitle="FibReg6_strat", overlay=true,
-         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+strategy("Fib Regime 6 - BOS Fib [Strategy]", shorttitle="FibReg6_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=10,
          initial_capital=10000, commission_type=strategy.commission.cash_per_order,
          commission_value=0, slippage=2, pyramiding=0,
          calc_on_every_tick=false, process_orders_on_close=true)
 
-// ── INPUTS ───────────────────────────────────────────────────
-i_emaFast       = input.int(50,    "EMA Fast",     group="Signal", minval=5)
-i_emaSlow       = input.int(200,   "EMA Slow",     group="Signal", minval=20)
-i_atrPeriod     = input.int(14,    "ATR Fast",     group="Signal", minval=1)
-i_swingLookback = input.int(14,    "Swing Lookback", group="Signal", minval=3)
-i_minImpulseATR = input.float(0.9, "Min Impulse",  group="Signal", minval=0.1, step=0.1)
-i_impulseBody   = input.float(0.55,"Body Ratio",   group="Signal", minval=0.1, step=0.1)
-i_regimeEnabled = input.bool(true, "Regime Blocker", group="Regime")
-i_atrSlowPeriod = input.int(50,    "ATR Slow",     group="Regime", minval=10)
-i_minVolRatio   = input.float(0.80,"Min Vol Ratio", group="Regime", step=0.05)
-i_slopeLookback = input.int(10,    "Slope Lookback", group="Regime", minval=2)
-i_minSlopeNorm  = input.float(0.30,"Min Slope",    group="Regime", step=0.05)
-i_volAdaptive   = input.bool(true, "Vol-Adaptive",  group="Vol Scaler")
-i_volClampMin   = input.float(0.80,"Clamp Min",    group="Vol Scaler", step=0.05)
-i_volClampMax   = input.float(1.40,"Clamp Max",    group="Vol Scaler", step=0.05)
-i_slMult        = input.float(0.85,"SL Mult",      group="TP/SL", step=0.05)
-i_tpMult        = input.float(1.90,"TP Mult",      group="TP/SL", step=0.05)
+// ── BOS SWING INPUTS ────────────────────────────────────────
+inp_swing_left  = input.int(5,     "Swing Left Bars",          group="BOS", minval=1)
+inp_swing_right = input.int(3,     "Swing Right Bars",         group="BOS", minval=1)
+inp_fib_entry_hi = input.float(0.618, "Fib Entry High",       group="BOS", step=0.01)
+inp_fib_entry_lo = input.float(0.500, "Fib Entry Low",        group="BOS", step=0.01)
+inp_fib_invalid  = input.float(0.786, "Fib Invalidation",     group="BOS", step=0.01)
 
-// ── CALCULATIONS ─────────────────────────────────────────────
-emaFast  = ta.ema(close, i_emaFast)
-emaSlow  = ta.ema(close, i_emaSlow)
-atrFast  = ta.atr(i_atrPeriod)
-atrSlow  = ta.atr(i_atrSlowPeriod)
+// ── VOLATILITY REGIME INPUTS ────────────────────────────────
+i_atrFastLen    = input.int(14,    "ATR Fast Length",          group="Regime", minval=1)
+i_atrSlowLen    = input.int(96,    "ATR Slow Length",          group="Regime", minval=10)
+i_volRatioMin   = input.float(0.80,"Vol Ratio Min",           group="Regime", step=0.05)
+i_volRatioMax   = input.float(2.00,"Vol Ratio Max",           group="Regime", step=0.05)
 
-swingHigh = ta.highest(high, i_swingLookback)
-swingLow  = ta.lowest(low, i_swingLookback)
-impulse   = swingHigh - swingLow
+// ── VOLUME SPIKE INPUTS ─────────────────────────────────────
+i_volAvgLen     = input.int(10,    "Volume Avg Length",        group="Volume", minval=1)
+i_volSpikeMult  = input.float(1.2, "Volume Spike Multiplier", group="Volume", step=0.1)
 
-bodyRatio = (high - low) > 0 ? math.abs(close - open) / (high - low) : 0
-volRatio  = atrSlow > 0 ? atrFast / atrSlow : 0
-emaSlope  = (emaFast - emaFast[i_slopeLookback]) / i_slopeLookback
-slopeNorm = atrFast > 0 ? math.abs(emaSlope) / atrFast : 0
-regimeOK  = not i_regimeEnabled or (volRatio >= i_minVolRatio and slopeNorm >= i_minSlopeNorm)
+// ── SESSION INPUTS ──────────────────────────────────────────
+i_useSession    = input.bool(true, "Use Session Filter",       group="Session")
+i_sessionStart  = input.int(7,     "Session Start (UTC)",      group="Session", minval=0, maxval=23)
+i_sessionEnd    = input.int(21,    "Session End (UTC)",        group="Session", minval=0, maxval=23)
 
-volFactor = 1.0
-if i_volAdaptive and atrSlow > 0
-    volFactor := math.max(i_volClampMin, math.min(i_volClampMax, atrFast / atrSlow))
+// ── BOS + FIBONACCI CORE LOGIC ──────────────────────────────
+var float prevSwingHigh    = na
+var float prevSwingLow     = na
+var float impulse_lo_bull  = na
+var float impulse_hi_bull  = na
+var float impulse_hi_bear  = na
+var float impulse_lo_bear  = na
+var bool  bos_bull_active  = false
+var bool  bos_bear_active  = false
+var bool  bull_invalidated = false
+var bool  bear_invalidated = false
 
-buyFibHi  = swingHigh - impulse * 0.50
-buyFibLo  = swingHigh - impulse * 0.618
-sellFibLo = swingLow + impulse * 0.50
-sellFibHi = swingLow + impulse * 0.618
+swingH = ta.pivothigh(high, inp_swing_left, inp_swing_right)
+swingL = ta.pivotlow(low, inp_swing_left, inp_swing_right)
 
-inSession = hour(time, "UTC") >= 7 and hour(time, "UTC") <= 21
+if not na(swingL)
+    prevSwingLow    := swingL
+    impulse_lo_bull := swingL
 
-buySignal  = emaFast > emaSlow and impulse >= atrFast * i_minImpulseATR and close > open and bodyRatio >= i_impulseBody and close >= buyFibLo and close <= buyFibHi and inSession and regimeOK
-sellSignal = emaFast < emaSlow and impulse >= atrFast * i_minImpulseATR and close < open and bodyRatio >= i_impulseBody and close >= sellFibLo and close <= sellFibHi and inSession and regimeOK
+if not na(swingH)
+    prevSwingHigh   := swingH
+    impulse_hi_bear := swingH
 
-origBuySL  = close - (swingLow - atrFast * 0.8)
-origBuyTP  = (swingHigh + atrFast * 1.5) - close
-origSellSL = (swingHigh + atrFast * 0.8) - close
-origSellTP = close - (swingLow - atrFast * 1.5)
+bosLong  = not na(prevSwingHigh) and close > prevSwingHigh and not bos_bull_active
+bosShort = not na(prevSwingLow)  and close < prevSwingLow  and not bos_bear_active
 
-// ── STRATEGY ENTRIES ─────────────────────────────────────────
-if buySignal
-    sl = close - origBuySL * i_slMult * volFactor
-    tp = close + origBuyTP * i_tpMult * volFactor
+if bosLong
+    impulse_hi_bull  := high
+    bos_bull_active  := true
+    bos_bear_active  := false
+    bull_invalidated := false
+    prevSwingHigh    := na
+
+if bosShort
+    impulse_lo_bear  := low
+    bos_bear_active  := true
+    bos_bull_active  := false
+    bear_invalidated := false
+    prevSwingLow     := na
+
+// ── FIBONACCI LEVELS ────────────────────────────────────────
+imp_range_bull = (not na(impulse_hi_bull) and not na(impulse_lo_bull)) ? impulse_hi_bull - impulse_lo_bull : na
+fib_0500_bull  = not na(imp_range_bull) ? impulse_hi_bull - 0.500 * imp_range_bull : na
+fib_0618_bull  = not na(imp_range_bull) ? impulse_hi_bull - 0.618 * imp_range_bull : na
+fib_0786_bull  = not na(imp_range_bull) ? impulse_hi_bull - 0.786 * imp_range_bull : na
+fib_1272_bull  = not na(imp_range_bull) ? impulse_hi_bull + 0.272 * imp_range_bull : na
+fib_1618_bull  = not na(imp_range_bull) ? impulse_hi_bull + 0.618 * imp_range_bull : na
+fib_2000_bull  = not na(imp_range_bull) ? impulse_hi_bull + 1.000 * imp_range_bull : na
+
+imp_range_bear = (not na(impulse_hi_bear) and not na(impulse_lo_bear)) ? impulse_hi_bear - impulse_lo_bear : na
+fib_0500_bear  = not na(imp_range_bear) ? impulse_lo_bear + 0.500 * imp_range_bear : na
+fib_0618_bear  = not na(imp_range_bear) ? impulse_lo_bear + 0.618 * imp_range_bear : na
+fib_0786_bear  = not na(imp_range_bear) ? impulse_lo_bear + 0.786 * imp_range_bear : na
+fib_1272_bear  = not na(imp_range_bear) ? impulse_lo_bear - 0.272 * imp_range_bear : na
+fib_1618_bear  = not na(imp_range_bear) ? impulse_lo_bear - 0.618 * imp_range_bear : na
+fib_2000_bear  = not na(imp_range_bear) ? impulse_lo_bear - 1.000 * imp_range_bear : na
+
+// ── INVALIDATION ────────────────────────────────────────────
+if bos_bull_active and not na(fib_0786_bull) and low < fib_0786_bull
+    bull_invalidated := true
+    bos_bull_active  := false
+
+if bos_bear_active and not na(fib_0786_bear) and high > fib_0786_bear
+    bear_invalidated := true
+    bos_bear_active  := false
+
+// ── GOLDEN POCKET DETECTION ─────────────────────────────────
+inPocketBull = bos_bull_active and not bull_invalidated and not na(fib_0618_bull) and low <= fib_0500_bull and close >= fib_0618_bull
+inPocketBear = bos_bear_active and not bear_invalidated and not na(fib_0618_bear) and high >= fib_0500_bear and close <= fib_0618_bear
+
+longSignal_raw  = inPocketBull and close > open
+shortSignal_raw = inPocketBear and close < open
+
+// ── TP/SL FROM FIB LEVELS ───────────────────────────────────
+long_sl  = fib_0786_bull - syminfo.mintick * 10
+long_tp2 = fib_1618_bull
+short_sl  = fib_0786_bear + syminfo.mintick * 10
+short_tp2 = fib_1618_bear
+
+// ── VOLATILITY REGIME FILTER ────────────────────────────────
+atr_short = ta.atr(i_atrFastLen)
+atr_long  = ta.atr(i_atrSlowLen)
+vol_ratio = atr_long > 0 ? atr_short / atr_long : 0.0
+vol_regime_active = vol_ratio > i_volRatioMin and vol_ratio < i_volRatioMax
+
+// ── VOLUME SPIKE CHECK ──────────────────────────────────────
+vol_avg    = ta.sma(volume, i_volAvgLen)
+volume_ok  = volume > vol_avg * i_volSpikeMult
+
+// ── SESSION FILTER ──────────────────────────────────────────
+currentHour = hour(time, "UTC")
+inSession   = i_useSession ? (currentHour >= i_sessionStart and currentHour <= i_sessionEnd) : true
+
+// ── FINAL SIGNALS ───────────────────────────────────────────
+longSignal  = longSignal_raw  and vol_regime_active and volume_ok and inSession
+shortSignal = shortSignal_raw and vol_regime_active and volume_ok and inSession
+
+// ── STRATEGY ENTRIES ────────────────────────────────────────
+if longSignal
     strategy.entry("Long", strategy.long)
-    strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+    strategy.exit("Long Exit", "Long", stop=long_sl, limit=long_tp2)
 
-if sellSignal
-    sl = close + origSellSL * i_slMult * volFactor
-    tp = close - origSellTP * i_tpMult * volFactor
+if shortSignal
     strategy.entry("Short", strategy.short)
-    strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+    strategy.exit("Short Exit", "Short", stop=short_sl, limit=short_tp2)
 
-// ── VISUALS ──────────────────────────────────────────────────
-plot(emaFast, "EMA Fast", color.blue, 1)
-plot(emaSlow, "EMA Slow", color.orange, 1)
-plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
-plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)
-bgcolor(i_regimeEnabled and not regimeOK ? color.new(color.gray, 90) : na)
+// ── VISUALS ─────────────────────────────────────────────────
+plotshape(longSignal,  "BOS Long",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(shortSignal, "BOS Short", shape.triangledown,  location.abovebar, color.red,  size=size.small)
+bgcolor(not vol_regime_active ? color.new(color.gray, 93) : na)

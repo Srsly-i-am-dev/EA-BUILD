@@ -1,11 +1,12 @@
 //@version=5
-indicator("Zigzag Sniper", shorttitle="ZZSniper", overlay=true, max_labels_count=500, max_lines_count=500)
+indicator("Zigzag Sniper [BOS+Fib Enhanced]", shorttitle="ZZSniper", overlay=true, max_labels_count=500, max_lines_count=500)
 
 // ── INPUTS ───────────────────────────────────────────────────
 i_zzLen        = input.int(5,     "Zigzag Length",        group="Zigzag", minval=2)
 i_maxPivots    = input.int(20,    "Max Pivots",           group="Zigzag", minval=5)
 i_showZZ       = input.bool(true, "Show Zigzag Lines",    group="Zigzag")
 i_showLabels   = input.bool(true, "Show Pivot Labels",    group="Zigzag")
+i_showFibs     = input.bool(true, "Show Fib Levels",      group="Zigzag")
 
 // Pattern
 i_hhhlFilter   = input.bool(true, "HH/HL Filter (Bull)", group="Pattern")
@@ -13,12 +14,12 @@ i_lhllFilter   = input.bool(true, "LH/LL Filter (Bear)", group="Pattern")
 i_minSwingATR  = input.float(1.0, "Min Swing Size (ATR)", group="Pattern", step=0.1)
 
 // Entry
-i_entryMode    = input.string("Break of Structure", "Entry Mode", group="Entry", options=["Break of Structure", "Fib Retrace", "Immediate"])
+i_entryMode    = input.string("Golden Pocket", "Entry Mode", group="Entry", options=["Golden Pocket", "Break of Structure", "Fib Retrace", "Immediate"])
 i_fibEntry     = input.float(0.618,"Fib Entry Level",    group="Entry", step=0.01)
 i_atrLen       = input.int(14,    "ATR Length",           group="Entry", minval=1)
 
 // TP/SL
-i_slMode       = input.string("Swing Level", "SL Mode", group="TP/SL", options=["Swing Level", "ATR Based"])
+i_slMode       = input.string("Fib Invalidation", "SL Mode", group="TP/SL", options=["Fib Invalidation", "Swing Level", "ATR Based"])
 i_slATRMult    = input.float(1.5, "SL ATR Mult",         group="TP/SL", step=0.1)
 i_tpMode       = input.string("Fib Extension", "TP Mode", group="TP/SL", options=["Fib Extension", "ATR Based", "R:R Based"])
 i_tpFibExt     = input.float(1.618,"TP Fib Extension",   group="TP/SL", step=0.01)
@@ -30,19 +31,16 @@ i_useSession   = input.bool(true, "Session Filter",      group="Session")
 
 // ── Webhook / MT5 ────────────────────────────────────────────
 wh_enable     = input.bool(true,   "Enable Webhook Alerts", group="Webhook / MT5")
-wh_atrLen     = input.int(14,      "Webhook ATR Length",    group="Webhook / MT5", minval=1)
-wh_tpMult     = input.float(2.0,   "Webhook TP Mult",      group="Webhook / MT5", step=0.1)
-wh_slMult     = input.float(1.5,   "Webhook SL Mult",      group="Webhook / MT5", step=0.1)
 wh_showLines  = input.bool(true,   "Show Webhook TP/SL",   group="Webhook / MT5")
 
 // ── ZIGZAG ENGINE ────────────────────────────────────────────
 var float[] zzPrices = array.new_float(0)
 var int[]   zzBars   = array.new_int(0)
-var int[]   zzDirs   = array.new_int(0)  // 1=high, -1=low
+var int[]   zzDirs   = array.new_int(0)
 var int     zzDir    = 0
 
 isHigh = high == ta.highest(high, i_zzLen)
-isLow  = low == ta.lowest(low, i_zzLen)
+isLow  = low  == ta.lowest(low, i_zzLen)
 atrVal = ta.atr(i_atrLen)
 
 newZZPivot = false
@@ -83,9 +81,8 @@ if newZZPivot
         array.pop(zzBars)
         array.pop(zzDirs)
 
-// ── PATTERN CLASSIFICATION ───────────────────────────────────
-// Classify last 4 pivots as HH/HL/LH/LL
-var int pivotPattern = 0  // 1=bullish (HH+HL), -1=bearish (LH+LL)
+// ── PATTERN CLASSIFICATION (HH/HL/LH/LL) ────────────────────
+var int pivotPattern = 0
 
 if array.size(zzPrices) >= 4
     p0 = array.get(zzPrices, 0)
@@ -94,95 +91,182 @@ if array.size(zzPrices) >= 4
     p3 = array.get(zzPrices, 3)
     d0 = array.get(zzDirs, 0)
 
-    // Bull: higher high + higher low
-    if d0 == 1  // latest is high
-        isHH = p0 > p2  // current high > prev high
-        isHL = p1 > p3  // current low > prev low
-        if isHH and isHL
-            pivotPattern := 1
-        else
-            pivotPattern := 0
-    if d0 == -1  // latest is low
-        isLH = p1 < p3  // current high < prev high
-        isLL = p0 < p2  // current low < prev low
-        if isLH and isLL
-            pivotPattern := -1
-        else
-            pivotPattern := 0
+    if d0 == 1
+        isHH = p0 > p2
+        isHL = p1 > p3
+        pivotPattern := isHH and isHL ? 1 : 0
+    if d0 == -1
+        isLH = p1 < p3
+        isLL = p0 < p2
+        pivotPattern := isLH and isLL ? -1 : 0
+
+// ── BOS DETECTION ────────────────────────────────────────────
+var bool  bosDetected   = false
+var int   bosDirection  = 0
+var float bosImpulseTop = na
+var float bosImpulseBot = na
+var int   bosBar        = 0
+
+bosDetected := false
+
+if array.size(zzPrices) >= 6
+    float lastLH = na
+    float lastLL = na
+    float lastHL = na
+    float lastHH = na
+
+    for i = 0 to math.min(array.size(zzPrices) - 1, 9)
+        float prc = array.get(zzPrices, i)
+        int   dir = array.get(zzDirs, i)
+        if dir == 1
+            if i + 2 < array.size(zzPrices)
+                float prevHigh = na
+                for j = i + 1 to math.min(array.size(zzPrices) - 1, i + 4)
+                    if array.get(zzDirs, j) == 1
+                        prevHigh := array.get(zzPrices, j)
+                        break
+                if not na(prevHigh)
+                    if prc < prevHigh and na(lastLH)
+                        lastLH := prc
+                    if prc > prevHigh and na(lastHH)
+                        lastHH := prc
+        if dir == -1
+            if i + 2 < array.size(zzPrices)
+                float prevLow = na
+                for j = i + 1 to math.min(array.size(zzPrices) - 1, i + 4)
+                    if array.get(zzDirs, j) == -1
+                        prevLow := array.get(zzPrices, j)
+                        break
+                if not na(prevLow)
+                    if prc < prevLow and na(lastLL)
+                        lastLL := prc
+                    if prc > prevLow and na(lastHL)
+                        lastHL := prc
+
+    if not na(lastLH) and not na(lastLL) and close > lastLH and close[1] <= lastLH
+        bosDetected    := true
+        bosDirection   := 1
+        bosImpulseBot  := lastLL
+        bosImpulseTop  := high
+        bosBar         := bar_index
+
+    if not na(lastHL) and not na(lastHH) and close < lastHL and close[1] >= lastHL
+        bosDetected    := true
+        bosDirection   := -1
+        bosImpulseTop  := lastHH
+        bosImpulseBot  := low
+        bosBar         := bar_index
 
 // ── SIGNALS ──────────────────────────────────────────────────
 inSession = i_useSession ? (hour(time, "UTC") >= 7 and hour(time, "UTC") <= 21) : true
 
-var bool buySignal  = false
-var bool sellSignal = false
-var float buySL     = na
-var float buyTP     = na
-var float sellSL    = na
-var float sellTP    = na
+var bool  buySignal  = false
+var bool  sellSignal = false
+var float buySL      = na
+var float buyTP      = na
+var float sellSL     = na
+var float sellTP     = na
+var float gpTop      = na
+var float gpBot      = na
+var int   gpDir      = 0
+var string zzDirection = ""
 
 buySignal  := false
 sellSignal := false
 
-if newZZPivot and array.size(zzPrices) >= 4 and inSession
-    p0 = array.get(zzPrices, 0)
-    p1 = array.get(zzPrices, 1)
-    swingSize = math.abs(p0 - p1)
+if bosDetected and inSession
+    impulseRange = math.abs(bosImpulseTop - bosImpulseBot)
+    validSize    = impulseRange >= atrVal * i_minSwingATR
 
-    validSize = swingSize >= atrVal * i_minSwingATR
+    if validSize
+        // --- BULLISH BOS ---
+        if bosDirection == 1
+            fib50   = bosImpulseTop - impulseRange * 0.5
+            fib618  = bosImpulseTop - impulseRange * 0.618
+            fib786  = bosImpulseTop - impulseRange * 0.786
+            ext1272 = bosImpulseBot + impulseRange * 1.272
+            ext1618 = bosImpulseBot + impulseRange * 1.618
+            ext200  = bosImpulseBot + impulseRange * 2.0
 
-    // Bullish: pattern confirmed + new low pivot (C point for entry)
-    bullOK = (not i_hhhlFilter or pivotPattern == 1) and zzPDir == -1 and validSize
-    bearOK = (not i_lhllFilter or pivotPattern == -1) and zzPDir == 1 and validSize
+            gpTop := fib50
+            gpBot := fib618
+            gpDir := 1
+            zzDirection := "BULL_BOS"
 
-    if bullOK
-        entryPrice = close
-        if i_entryMode == "Fib Retrace"
-            entryPrice := p0 + (p1 - p0) * (1 - i_fibEntry)
+            if i_slMode == "Fib Invalidation"
+                buySL := fib786
+            else if i_slMode == "Swing Level"
+                buySL := bosImpulseBot - atrVal * 0.2
+            else
+                buySL := close - atrVal * i_slATRMult
 
-        // SL
-        if i_slMode == "Swing Level"
-            buySL := p0 - atrVal * 0.2
-        else
-            buySL := entryPrice - atrVal * i_slATRMult
+            if i_tpMode == "Fib Extension"
+                buyTP := ext1618
+            else if i_tpMode == "ATR Based"
+                buyTP := close + atrVal * i_tpATRMult
+            else
+                buyTP := close + math.abs(close - buySL) * i_tpRR
 
-        slDist = math.abs(entryPrice - buySL)
+            buySignal := true
 
-        // TP
-        if i_tpMode == "Fib Extension"
-            abRange = math.abs(p1 - array.get(zzPrices, 2))
-            buyTP := p0 + abRange * i_tpFibExt
-        else if i_tpMode == "ATR Based"
-            buyTP := entryPrice + atrVal * i_tpATRMult
-        else
-            buyTP := entryPrice + slDist * i_tpRR
+            label.new(bosBar, high, "BOS", color=color.new(color.lime, 40), textcolor=color.white, style=label.style_label_down, size=size.tiny)
 
-        buySignal := true
+            if i_showFibs
+                int fibLen = 40
+                line.new(bosBar, fib50,   bosBar + fibLen, fib50,   color=color.new(#FFD700, 30), width=1, style=line.style_dashed)
+                line.new(bosBar, fib618,  bosBar + fibLen, fib618,  color=color.new(color.green, 30), width=1, style=line.style_dashed)
+                line.new(bosBar, fib786,  bosBar + fibLen, fib786,  color=color.new(color.red, 30), width=1, style=line.style_dashed)
+                line.new(bosBar, ext1272, bosBar + fibLen, ext1272, color=color.new(color.blue, 30), width=1, style=line.style_dashed)
+                line.new(bosBar, ext1618, bosBar + fibLen, ext1618, color=color.new(color.blue, 30), width=1, style=line.style_dashed)
+                line.new(bosBar, ext200,  bosBar + fibLen, ext200,  color=color.new(color.blue, 30), width=1, style=line.style_dashed)
 
-    if bearOK
-        entryPrice = close
-        if i_entryMode == "Fib Retrace"
-            entryPrice := p0 - (p0 - p1) * (1 - i_fibEntry)
+        // --- BEARISH BOS ---
+        if bosDirection == -1
+            fib50   = bosImpulseBot + impulseRange * 0.5
+            fib618  = bosImpulseBot + impulseRange * 0.618
+            fib786  = bosImpulseBot + impulseRange * 0.786
+            ext1272 = bosImpulseTop - impulseRange * 1.272
+            ext1618 = bosImpulseTop - impulseRange * 1.618
+            ext200  = bosImpulseTop - impulseRange * 2.0
 
-        if i_slMode == "Swing Level"
-            sellSL := p0 + atrVal * 0.2
-        else
-            sellSL := entryPrice + atrVal * i_slATRMult
+            gpTop := fib618
+            gpBot := fib50
+            gpDir := -1
+            zzDirection := "BEAR_BOS"
 
-        slDist = math.abs(sellSL - entryPrice)
+            if i_slMode == "Fib Invalidation"
+                sellSL := fib786
+            else if i_slMode == "Swing Level"
+                sellSL := bosImpulseTop + atrVal * 0.2
+            else
+                sellSL := close + atrVal * i_slATRMult
 
-        if i_tpMode == "Fib Extension"
-            abRange = math.abs(p1 - array.get(zzPrices, 2))
-            sellTP := p0 - abRange * i_tpFibExt
-        else if i_tpMode == "ATR Based"
-            sellTP := entryPrice - atrVal * i_tpATRMult
-        else
-            sellTP := entryPrice - slDist * i_tpRR
+            if i_tpMode == "Fib Extension"
+                sellTP := ext1618
+            else if i_tpMode == "ATR Based"
+                sellTP := close - atrVal * i_tpATRMult
+            else
+                sellTP := close - math.abs(sellSL - close) * i_tpRR
 
-        sellSignal := true
+            sellSignal := true
+
+            label.new(bosBar, low, "BOS", color=color.new(color.red, 40), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+
+            if i_showFibs
+                int fibLen = 40
+                line.new(bosBar, fib50,   bosBar + fibLen, fib50,   color=color.new(#FFD700, 30), width=1, style=line.style_dashed)
+                line.new(bosBar, fib618,  bosBar + fibLen, fib618,  color=color.new(color.green, 30), width=1, style=line.style_dashed)
+                line.new(bosBar, fib786,  bosBar + fibLen, fib786,  color=color.new(color.red, 30), width=1, style=line.style_dashed)
+                line.new(bosBar, ext1272, bosBar + fibLen, ext1272, color=color.new(color.blue, 30), width=1, style=line.style_dashed)
+                line.new(bosBar, ext1618, bosBar + fibLen, ext1618, color=color.new(color.blue, 30), width=1, style=line.style_dashed)
+                line.new(bosBar, ext200,  bosBar + fibLen, ext200,  color=color.new(color.blue, 30), width=1, style=line.style_dashed)
 
 // ── VISUALS ──────────────────────────────────────────────────
 plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
 plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)
+
+inGoldenPocket = (gpDir == 1 and close >= gpBot and close <= gpTop) or (gpDir == -1 and close >= gpBot and close <= gpTop)
+bgcolor(inGoldenPocket ? color.new(color.orange, 90) : na, title="Golden Pocket Zone")
 
 // Draw zigzag on last bar
 if barstate.islast and i_showZZ and array.size(zzPrices) >= 2
@@ -196,10 +280,21 @@ if barstate.islast and i_showZZ and array.size(zzPrices) >= 2
 
         if i_showLabels
             d = array.get(zzDirs, idx)
-            lbl = d == 1 ? "H" : "L"
+            string lblTxt = d == 1 ? "H" : "L"
+            if idx + 2 < array.size(zzPrices)
+                float prevSame = na
+                for j = idx + 1 to math.min(array.size(zzPrices) - 1, idx + 3)
+                    if array.get(zzDirs, j) == d
+                        prevSame := array.get(zzPrices, j)
+                        break
+                if not na(prevSame)
+                    if d == 1
+                        lblTxt := p1Price > prevSame ? "HH" : "LH"
+                    else
+                        lblTxt := p1Price > prevSame ? "HL" : "LL"
             lblStyle = d == 1 ? label.style_label_down : label.style_label_up
-            lblColor = d == 1 ? color.new(color.red, 60) : color.new(color.lime, 60)
-            label.new(p1Bar, p1Price, lbl, color=lblColor, textcolor=color.white, style=lblStyle, size=size.tiny)
+            lblColor = d == 1 ? (str.contains(lblTxt, "HH") ? color.new(color.lime, 40) : color.new(color.red, 60)) : (str.contains(lblTxt, "HL") ? color.new(color.lime, 40) : color.new(color.red, 60))
+            label.new(p1Bar, p1Price, lblTxt, color=lblColor, textcolor=color.white, style=lblStyle, size=size.tiny)
 
 // TP/SL lines
 if buySignal
@@ -211,51 +306,45 @@ if sellSignal
     line.new(bar_index, sellSL, bar_index + 20, sellSL, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
 
 // Info table
-var table tbl = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 80), border_width=1)
+var table tbl = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 80), border_width=1)
 if barstate.islast
     table.cell(tbl, 0, 0, "ZZ Sniper", text_color=color.white, text_size=size.small)
-    table.cell(tbl, 1, 0, i_entryMode, text_color=color.yellow, text_size=size.small)
-    table.cell(tbl, 0, 1, "Pivots", text_color=color.gray, text_size=size.tiny)
-    table.cell(tbl, 1, 1, str.tostring(array.size(zzPrices)), text_color=color.white, text_size=size.tiny)
-    table.cell(tbl, 0, 2, "Pattern", text_color=color.gray, text_size=size.tiny)
-    table.cell(tbl, 1, 2, pivotPattern == 1 ? "BULL" : pivotPattern == -1 ? "BEAR" : "FLAT", text_color=pivotPattern == 1 ? color.lime : pivotPattern == -1 ? color.red : color.gray, text_size=size.tiny)
-    table.cell(tbl, 0, 3, "ATR", text_color=color.gray, text_size=size.tiny)
-    table.cell(tbl, 1, 3, str.tostring(atrVal, "#.#####"), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 0, "BOS+Fib Enhanced", text_color=color.yellow, text_size=size.small)
+    table.cell(tbl, 0, 1, "Entry", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 1, i_entryMode, text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 2, "Pivots", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 2, str.tostring(array.size(zzPrices)), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 3, "Pattern", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 3, pivotPattern == 1 ? "BULL" : pivotPattern == -1 ? "BEAR" : "FLAT", text_color=pivotPattern == 1 ? color.lime : pivotPattern == -1 ? color.red : color.gray, text_size=size.tiny)
+    table.cell(tbl, 0, 4, "ATR", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 4, str.tostring(atrVal, "#.#####"), text_color=color.white, text_size=size.tiny)
 
-// ── WEBHOOK ENHANCEMENT ──────────────────────────────────────
-wh_atr = ta.atr(wh_atrLen)
-
-// Use existing indicator TP/SL prices
-wh_buyTP  = buySignal  ? buyTP  : na
-wh_buySL  = buySignal  ? buySL  : na
-wh_sellTP = sellSignal ? sellTP : na
-wh_sellSL = sellSignal ? sellSL : na
-
+// ── WEBHOOK / ALERT ENHANCEMENT ──────────────────────────────
 wh_buyRR  = buySignal  and buySL < close ? str.tostring(math.round((buyTP - close) / (close - buySL), 2)) : "0"
 wh_sellRR = sellSignal and sellSL > close ? str.tostring(math.round((close - sellTP) / (sellSL - close), 2)) : "0"
 
 // Alert conditions
-alertcondition(buySignal,  title="ZZSniper BUY",  message="ZZSniper BUY signal")
-alertcondition(sellSignal, title="ZZSniper SELL", message="ZZSniper SELL signal")
+alertcondition(buySignal,  title="ZZSniper BUY",  message="ZZSniper BOS BUY signal")
+alertcondition(sellSignal, title="ZZSniper SELL", message="ZZSniper BOS SELL signal")
 
-// Webhook JSON alerts
+// Webhook JSON alerts with zigzag direction
 if wh_enable and buySignal
-    wh_msg = '{"indicator_id":"ZZSniper","strategy_id":"zigzag_sniper","symbol":"' + syminfo.ticker + '","action":"BUY","risk":1.0,"meta":{"tp":' + str.tostring(wh_buyTP, "#.#####") + ',"sl":' + str.tostring(wh_buySL, "#.#####") + ',"rr":"' + wh_buyRR + ':1"}}'
+    wh_msg = '{"indicator_id":"ZigzagSniper","strategy_id":"zigzag_sniper","symbol":"' + syminfo.ticker + '","action":"BUY","zigzag_direction":"' + zzDirection + '","bos":true,"risk":1.0,"meta":{"tp":' + str.tostring(buyTP, "#.#####") + ',"sl":' + str.tostring(buySL, "#.#####") + ',"rr":"' + wh_buyRR + ':1","fib_entry":"golden_pocket_0.5_0.618"}}'
     alert(wh_msg, alert.freq_once_per_bar_close)
 
 if wh_enable and sellSignal
-    wh_msg = '{"indicator_id":"ZZSniper","strategy_id":"zigzag_sniper","symbol":"' + syminfo.ticker + '","action":"SELL","risk":1.0,"meta":{"tp":' + str.tostring(wh_sellTP, "#.#####") + ',"sl":' + str.tostring(wh_sellSL, "#.#####") + ',"rr":"' + wh_sellRR + ':1"}}'
+    wh_msg = '{"indicator_id":"ZigzagSniper","strategy_id":"zigzag_sniper","symbol":"' + syminfo.ticker + '","action":"SELL","zigzag_direction":"' + zzDirection + '","bos":true,"risk":1.0,"meta":{"tp":' + str.tostring(sellTP, "#.#####") + ',"sl":' + str.tostring(sellSL, "#.#####") + ',"rr":"' + wh_sellRR + ':1","fib_entry":"golden_pocket_0.5_0.618"}}'
     alert(wh_msg, alert.freq_once_per_bar_close)
 
 // Webhook TP/SL chart lines
 if wh_showLines and wh_enable and buySignal
-    line.new(bar_index, wh_buyTP, bar_index + 25, wh_buyTP, color=color.new(color.teal, 20), width=1, style=line.style_dotted)
-    line.new(bar_index, wh_buySL, bar_index + 25, wh_buySL, color=color.new(color.maroon, 20), width=1, style=line.style_dotted)
-    label.new(bar_index + 25, wh_buyTP, "WH-TP", color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
-    label.new(bar_index + 25, wh_buySL, "WH-SL", color=color.new(color.maroon, 20), textcolor=color.white, size=size.tiny)
+    line.new(bar_index, buyTP, bar_index + 25, buyTP, color=color.new(color.teal, 20), width=1, style=line.style_dotted)
+    line.new(bar_index, buySL, bar_index + 25, buySL, color=color.new(color.maroon, 20), width=1, style=line.style_dotted)
+    label.new(bar_index + 25, buyTP, "WH-TP", color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
+    label.new(bar_index + 25, buySL, "WH-SL", color=color.new(color.maroon, 20), textcolor=color.white, size=size.tiny)
 
 if wh_showLines and wh_enable and sellSignal
-    line.new(bar_index, wh_sellTP, bar_index + 25, wh_sellTP, color=color.new(color.teal, 20), width=1, style=line.style_dotted)
-    line.new(bar_index, wh_sellSL, bar_index + 25, wh_sellSL, color=color.new(color.maroon, 20), width=1, style=line.style_dotted)
-    label.new(bar_index + 25, wh_sellTP, "WH-TP", color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
-    label.new(bar_index + 25, wh_sellSL, "WH-SL", color=color.new(color.maroon, 20), textcolor=color.white, size=size.tiny)
+    line.new(bar_index, sellTP, bar_index + 25, sellTP, color=color.new(color.teal, 20), width=1, style=line.style_dotted)
+    line.new(bar_index, sellSL, bar_index + 25, sellSL, color=color.new(color.maroon, 20), width=1, style=line.style_dotted)
+    label.new(bar_index + 25, sellTP, "WH-TP", color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
+    label.new(bar_index + 25, sellSL, "WH-SL", color=color.new(color.maroon, 20), textcolor=color.white, size=size.tiny)

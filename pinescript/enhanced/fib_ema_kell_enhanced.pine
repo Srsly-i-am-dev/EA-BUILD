@@ -1,169 +1,177 @@
 //@version=5
-indicator("Fib EMA Kell Intraday", shorttitle="FibEMA", overlay=true, max_labels_count=500, max_lines_count=500)
+indicator("Fib EMA Kell BOS [Enhanced]", shorttitle="FibEMA_BOS_enh", overlay=true, max_labels_count=500, max_lines_count=500)
 
 // ── INPUTS ───────────────────────────────────────────────────
-// Signal Parameters
-i_emaFast       = input.int(50,    "EMA Fast Period",          group="Signal", minval=5)
-i_emaSlow       = input.int(200,   "EMA Slow Period",          group="Signal", minval=20)
-i_atrPeriod     = input.int(14,    "ATR Period",               group="Signal", minval=1)
-i_swingLookback = input.int(15,    "Swing Lookback Bars",      group="Signal", minval=3)
-i_minImpulseATR = input.float(0.8, "Min Impulse (ATR mult)",   group="Signal", minval=0.1, step=0.1)
-i_impulseBody   = input.float(0.4, "Min Impulse Body (ATR mult)", group="Signal", minval=0.1, step=0.1)
+// EMA Trend Filter
+i_emaFast        = input.int(50,      "EMA Fast Period",              group="Trend", minval=5)
+i_emaSlow        = input.int(200,     "EMA Slow Period",              group="Trend", minval=20)
+i_atrPeriod      = input.int(14,      "ATR Period",                   group="Trend", minval=1)
 
-// Fibonacci Zone
-i_fibUpper      = input.float(0.618, "Fib Upper Level",        group="Fibonacci", minval=0.1, maxval=1.0, step=0.01)
-i_fibLower      = input.float(0.50,  "Fib Lower Level",        group="Fibonacci", minval=0.1, maxval=1.0, step=0.01)
+// BOS / Swing
+inp_swing_left   = input.int(5,       "Swing Left Bars",              group="BOS", minval=1)
+inp_swing_right  = input.int(3,       "Swing Right Bars",             group="BOS", minval=1)
+inp_min_impulse  = input.float(0.5,   "Min Impulse (ATR mult)",       group="BOS", minval=0.1, step=0.1)
+inp_max_impulse  = input.float(3.0,   "Max Impulse (ATR mult)",       group="BOS", minval=1.0, step=0.1)
 
-// TP/SL
-i_slMult        = input.float(0.8, "SL ATR Multiplier",        group="TP/SL", minval=0.1, step=0.1)
-i_tpMult        = input.float(1.5, "TP ATR Multiplier",        group="TP/SL", minval=0.1, step=0.1)
+// Fibonacci
+inp_fib_entry_hi = input.float(0.618, "Fib Entry High (GP Top)",      group="Fibonacci", minval=0.1, maxval=1.0, step=0.001)
+inp_fib_entry_lo = input.float(0.500, "Fib Entry Low (GP Bottom)",    group="Fibonacci", minval=0.1, maxval=1.0, step=0.001)
+inp_fib_invalid  = input.float(0.786, "Fib Invalidation Level",       group="Fibonacci", minval=0.5, maxval=1.0, step=0.001)
+inp_show_fib     = input.bool(true,   "Show Fib Levels",              group="Fibonacci")
 
-// Session Filter
-i_useSession    = input.bool(true,  "Use Session Filter",      group="Session")
-i_sessionStart  = input.int(7,      "Session Start Hour (UTC)", group="Session", minval=0, maxval=23)
-i_sessionEnd    = input.int(21,     "Session End Hour (UTC)",   group="Session", minval=0, maxval=23)
-
-// Setup Expiry
-i_setupBars     = input.int(3,      "Setup Valid Bars",         group="Setup", minval=1, maxval=10)
-
-// Visuals
-i_showFibZone   = input.bool(true,  "Show Fib Zone",           group="Display")
-i_showTPSL      = input.bool(true,  "Show TP/SL Levels",       group="Display")
-
-// ── WEBHOOK TP/SL INPUTS ─────────────────────────────────────
-wh_enable      = input.bool(true,  "Enable Webhook Alerts",    group="Webhook / MT5")
-wh_atrLen      = input.int(14,     "ATR Length",               group="Webhook / MT5", minval=1)
-wh_tpMult      = input.float(2.0,  "TP ATR Multiplier",        group="Webhook / MT5", minval=0.1, step=0.1)
-wh_slMult      = input.float(1.0,  "SL ATR Multiplier",        group="Webhook / MT5", minval=0.1, step=0.1)
-wh_showLines   = input.bool(true,  "Show TP/SL Lines on Chart",group="Webhook / MT5")
+// Webhook
+wh_enable        = input.bool(true,   "Enable Webhook Alerts",        group="Webhook / MT5")
 
 // ── CALCULATIONS ─────────────────────────────────────────────
 emaFast = ta.ema(close, i_emaFast)
 emaSlow = ta.ema(close, i_emaSlow)
 atrVal  = ta.atr(i_atrPeriod)
 
-// Trend direction
 bullishTrend = emaFast > emaSlow
 bearishTrend = emaFast < emaSlow
 
-// Swing high/low over lookback period
-swingHigh = ta.highest(high, i_swingLookback)
-swingLow  = ta.lowest(low, i_swingLookback)
-impulse   = swingHigh - swingLow
+// ── BOS STATE VARIABLES ──────────────────────────────────────
+var float prevSwingHigh   = na
+var float prevSwingLow    = na
+var float impulse_lo_bull = na
+var float impulse_hi_bull = na
+var float impulse_hi_bear = na
+var float impulse_lo_bear = na
+var bool  bos_bull_active = false
+var bool  bos_bear_active = false
+var bool  bull_invalidated = false
+var bool  bear_invalidated = false
 
-// Impulse validation
-impulseValid = impulse >= atrVal * i_minImpulseATR
+// ── PIVOT DETECTION ──────────────────────────────────────────
+swingH = ta.pivothigh(high, inp_swing_left, inp_swing_right)
+swingL = ta.pivotlow(low, inp_swing_left, inp_swing_right)
 
-// Impulse candle check
-bullishImpulseCandle = close > open and (close - open) > atrVal * i_impulseBody
-bearishImpulseCandle = close < open and (open - close) > atrVal * i_impulseBody
+if not na(swingL)
+    prevSwingLow    := swingL
+    impulse_lo_bull := swingL
 
-// Session filter
-currentHour = hour(time, "UTC")
-inSession = i_useSession ? (currentHour >= i_sessionStart and currentHour <= i_sessionEnd) : true
+if not na(swingH)
+    prevSwingHigh   := swingH
+    impulse_hi_bear := swingH
 
-// ── FIBONACCI ZONE CALCULATION ───────────────────────────────
-// Buy setup: fib retracement of bullish impulse (measured from swing high)
-buyFibUpper = swingHigh - impulse * i_fibLower   // 0.50 level (higher price)
-buyFibLower = swingHigh - impulse * i_fibUpper   // 0.618 level (lower price)
+// ── BOS DETECTION ────────────────────────────────────────────
+bosLong  = not na(prevSwingHigh) and close > prevSwingHigh and not bos_bull_active
+bosShort = not na(prevSwingLow)  and close < prevSwingLow  and not bos_bear_active
 
-// Sell setup: fib retracement of bearish impulse (measured from swing low)
-sellFibLower = swingLow + impulse * i_fibLower   // 0.50 level (lower price)
-sellFibUpper = swingLow + impulse * i_fibUpper   // 0.618 level (higher price)
+if bosLong
+    impulse_hi_bull  := high
+    bos_bull_active  := true
+    bos_bear_active  := false
+    bull_invalidated := false
+    prevSwingHigh    := na
 
-// Price in fib zone check
-priceInBuyZone  = close >= buyFibLower and close <= buyFibUpper
-priceInSellZone = close >= sellFibLower and close <= sellFibUpper
+if bosShort
+    impulse_lo_bear  := low
+    bos_bear_active  := true
+    bos_bull_active  := false
+    bear_invalidated := false
+    prevSwingLow     := na
 
-// ── SIGNAL GENERATION ────────────────────────────────────────
-// Buy: bullish trend + valid impulse + bullish candle + price in fib zone + in session
-buySignal  = bullishTrend and impulseValid and bullishImpulseCandle and priceInBuyZone and inSession
-sellSignal = bearishTrend and impulseValid and bearishImpulseCandle and priceInSellZone and inSession
+// ── FIBONACCI ON IMPULSE LEG ─────────────────────────────────
+imp_range_bull = (not na(impulse_hi_bull) and not na(impulse_lo_bull)) ? (impulse_hi_bull - impulse_lo_bull) : na
+fib_0618_bull  = not na(imp_range_bull) ? impulse_hi_bull - inp_fib_entry_hi * imp_range_bull : na
+fib_0500_bull  = not na(imp_range_bull) ? impulse_hi_bull - inp_fib_entry_lo * imp_range_bull : na
+fib_0786_bull  = not na(imp_range_bull) ? impulse_hi_bull - inp_fib_invalid  * imp_range_bull : na
+fib_1272_bull  = not na(imp_range_bull) ? impulse_hi_bull + 0.272 * imp_range_bull : na
+fib_1618_bull  = not na(imp_range_bull) ? impulse_hi_bull + 0.618 * imp_range_bull : na
+fib_2000_bull  = not na(imp_range_bull) ? impulse_hi_bull + 1.000 * imp_range_bull : na
 
-// ── TP/SL LEVELS ─────────────────────────────────────────────
-buyTP  = swingHigh + atrVal * i_tpMult
-buySL  = swingLow - atrVal * i_slMult
-sellTP = swingLow - atrVal * i_tpMult
-sellSL = swingHigh + atrVal * i_slMult
+imp_range_bear = (not na(impulse_hi_bear) and not na(impulse_lo_bear)) ? (impulse_hi_bear - impulse_lo_bear) : na
+fib_0618_bear  = not na(imp_range_bear) ? impulse_lo_bear + inp_fib_entry_hi * imp_range_bear : na
+fib_0500_bear  = not na(imp_range_bear) ? impulse_lo_bear + inp_fib_entry_lo * imp_range_bear : na
+fib_0786_bear  = not na(imp_range_bear) ? impulse_lo_bear + inp_fib_invalid  * imp_range_bear : na
+fib_1272_bear  = not na(imp_range_bear) ? impulse_lo_bear - 0.272 * imp_range_bear : na
+fib_1618_bear  = not na(imp_range_bear) ? impulse_lo_bear - 0.618 * imp_range_bear : na
+fib_2000_bear  = not na(imp_range_bear) ? impulse_lo_bear - 1.000 * imp_range_bear : na
+
+// ── INVALIDATION ─────────────────────────────────────────────
+if bos_bull_active and not na(fib_0786_bull) and low < fib_0786_bull
+    bull_invalidated := true
+    bos_bull_active  := false
+
+if bos_bear_active and not na(fib_0786_bear) and high > fib_0786_bear
+    bear_invalidated := true
+    bos_bear_active  := false
+
+// ── ATR IMPULSE FILTERS ─────────────────────────────────────
+bull_impulse_ok = not na(imp_range_bull) and imp_range_bull > atrVal * inp_min_impulse and imp_range_bull < atrVal * inp_max_impulse
+bear_impulse_ok = not na(imp_range_bear) and imp_range_bear > atrVal * inp_min_impulse and imp_range_bear < atrVal * inp_max_impulse
+
+// ── GOLDEN POCKET ENTRY ──────────────────────────────────────
+inPocketBull = bos_bull_active and not bull_invalidated and not na(fib_0618_bull) and low <= fib_0500_bull and close >= fib_0618_bull
+inPocketBear = bos_bear_active and not bear_invalidated and not na(fib_0618_bear) and high >= fib_0500_bear and close <= fib_0618_bear
+
+longSignal  = inPocketBull and (close > open) and bullishTrend and bull_impulse_ok
+shortSignal = inPocketBear and (close < open) and bearishTrend and bear_impulse_ok
+
+// ── SL / TP ──────────────────────────────────────────────────
+long_sl  = fib_0786_bull - syminfo.mintick * 10
+long_tp1 = fib_1272_bull
+long_tp2 = fib_1618_bull
+long_tp3 = fib_2000_bull
+
+short_sl  = fib_0786_bear + syminfo.mintick * 10
+short_tp1 = fib_1272_bear
+short_tp2 = fib_1618_bear
+short_tp3 = fib_2000_bear
 
 // ── VISUALS ──────────────────────────────────────────────────
-// EMA plots
-plot(emaFast, "EMA Fast", color=color.new(color.blue, 0), linewidth=1)
-plot(emaSlow, "EMA Slow", color=color.new(color.orange, 0), linewidth=1)
+plot(emaFast, "EMA 50",  color.new(color.blue, 0),   linewidth=1)
+plot(emaSlow, "EMA 200", color.new(color.orange, 0),  linewidth=1)
 
-// Signal arrows
-plotshape(buySignal,  "Buy Signal",  shape.triangleup,   location.belowbar, color.lime,  size=size.small)
-plotshape(sellSignal, "Sell Signal", shape.triangledown,  location.abovebar, color.red,   size=size.small)
+// Fib level plots
+plot(inp_show_fib and bos_bull_active ? fib_0500_bull : na, "Bull GP Low",       color.new(color.green, 50),  linewidth=1, style=plot.style_linebr)
+plot(inp_show_fib and bos_bull_active ? fib_0618_bull : na, "Bull GP High",      color.new(color.green, 30),  linewidth=1, style=plot.style_linebr)
+plot(inp_show_fib and bos_bull_active ? fib_0786_bull : na, "Bull Invalidation", color.new(color.red, 50),    linewidth=1, style=plot.style_cross)
+plot(inp_show_fib and bos_bull_active ? fib_1272_bull : na, "Bull TP1 (1.272)",  color.new(color.teal, 50),   linewidth=1, style=plot.style_linebr)
+plot(inp_show_fib and bos_bull_active ? fib_1618_bull : na, "Bull TP2 (1.618)",  color.new(color.teal, 30),   linewidth=1, style=plot.style_linebr)
+plot(inp_show_fib and bos_bull_active ? fib_2000_bull : na, "Bull TP3 (2.0)",    color.new(color.teal, 10),   linewidth=1, style=plot.style_linebr)
 
-// TP/SL lines on signal bars
-if i_showTPSL and buySignal
-    line.new(bar_index, buyTP, bar_index + 20, buyTP, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
-    line.new(bar_index, buySL, bar_index + 20, buySL, color=color.new(color.red, 30), width=2, style=line.style_dashed)
-    label.new(bar_index + 10, buyTP, "TP: " + str.tostring(buyTP, "#.##"), color=color.new(color.lime, 70), textcolor=color.white, style=label.style_label_left, size=size.tiny)
-    label.new(bar_index + 10, buySL, "SL: " + str.tostring(buySL, "#.##"), color=color.new(color.red, 70), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+plot(inp_show_fib and bos_bear_active ? fib_0500_bear : na, "Bear GP High",      color.new(color.red, 50),    linewidth=1, style=plot.style_linebr)
+plot(inp_show_fib and bos_bear_active ? fib_0618_bear : na, "Bear GP Low",       color.new(color.red, 30),    linewidth=1, style=plot.style_linebr)
+plot(inp_show_fib and bos_bear_active ? fib_0786_bear : na, "Bear Invalidation", color.new(color.green, 50),  linewidth=1, style=plot.style_cross)
+plot(inp_show_fib and bos_bear_active ? fib_1272_bear : na, "Bear TP1 (1.272)",  color.new(color.maroon, 50), linewidth=1, style=plot.style_linebr)
+plot(inp_show_fib and bos_bear_active ? fib_1618_bear : na, "Bear TP2 (1.618)",  color.new(color.maroon, 30), linewidth=1, style=plot.style_linebr)
+plot(inp_show_fib and bos_bear_active ? fib_2000_bear : na, "Bear TP3 (2.0)",    color.new(color.maroon, 10), linewidth=1, style=plot.style_linebr)
 
-if i_showTPSL and sellSignal
-    line.new(bar_index, sellTP, bar_index + 20, sellTP, color=color.new(color.red, 30), width=2, style=line.style_dashed)
-    line.new(bar_index, sellSL, bar_index + 20, sellSL, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
-    label.new(bar_index + 10, sellTP, "TP: " + str.tostring(sellTP, "#.##"), color=color.new(color.red, 70), textcolor=color.white, style=label.style_label_left, size=size.tiny)
-    label.new(bar_index + 10, sellSL, "SL: " + str.tostring(sellSL, "#.##"), color=color.new(color.lime, 70), textcolor=color.white, style=label.style_label_left, size=size.tiny)
-
-// Fib zone shading
-var box buyZoneBox = na
-var box sellZoneBox = na
-
-if i_showFibZone and buySignal
-    buyZoneBox := box.new(bar_index - i_swingLookback, buyFibUpper, bar_index, buyFibLower, border_color=color.new(color.lime, 60), bgcolor=color.new(color.lime, 90))
-
-if i_showFibZone and sellSignal
-    sellZoneBox := box.new(bar_index - i_swingLookback, sellFibUpper, bar_index, sellFibLower, border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 90))
+// Signal shapes
+plotshape(longSignal,  "Long Signal",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(shortSignal, "Short Signal", shape.triangledown,  location.abovebar, color.red,  size=size.small)
+plotshape(bosLong,  "BOS Bull", shape.diamond, location.abovebar, color.new(color.green, 0), size=size.tiny, text="BOS")
+plotshape(bosShort, "BOS Bear", shape.diamond, location.belowbar, color.new(color.red, 0),   size=size.tiny, text="BOS")
 
 // ── INFO TABLE ───────────────────────────────────────────────
-var table infoTable = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 80), border_width=1)
+var table infoTable = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80), border_width=1)
 if barstate.islast
-    table.cell(infoTable, 0, 0, "Fib EMA Kell", text_color=color.white, text_size=size.small)
-    table.cell(infoTable, 1, 0, "", text_color=color.white, text_size=size.small)
+    stateStr = bos_bull_active ? (inPocketBull ? "BOS BULL - In Pocket" : "BOS BULL - Waiting") : bos_bear_active ? (inPocketBear ? "BOS BEAR - In Pocket" : "BOS BEAR - Waiting") : "No Active BOS"
+    stateClr = bos_bull_active ? color.lime : bos_bear_active ? color.red : color.gray
+    table.cell(infoTable, 0, 0, "Fib EMA Kell BOS", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, "v2.0 Enhanced", text_color=color.yellow, text_size=size.small)
     table.cell(infoTable, 0, 1, "Trend", text_color=color.gray, text_size=size.tiny)
     table.cell(infoTable, 1, 1, bullishTrend ? "BULLISH" : bearishTrend ? "BEARISH" : "NEUTRAL", text_color=bullishTrend ? color.lime : bearishTrend ? color.red : color.gray, text_size=size.tiny)
     table.cell(infoTable, 0, 2, "ATR", text_color=color.gray, text_size=size.tiny)
     table.cell(infoTable, 1, 2, str.tostring(atrVal, "#.##"), text_color=color.white, text_size=size.tiny)
-    table.cell(infoTable, 0, 3, "Impulse", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 3, str.tostring(impulse, "#.##"), text_color=impulseValid ? color.lime : color.red, text_size=size.tiny)
-    table.cell(infoTable, 0, 4, "Session", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 4, inSession ? "ACTIVE" : "CLOSED", text_color=inSession ? color.lime : color.red, text_size=size.tiny)
+    table.cell(infoTable, 0, 3, "BOS State", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 3, stateStr, text_color=stateClr, text_size=size.tiny)
+    table.cell(infoTable, 0, 4, "Bull Range", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 4, not na(imp_range_bull) ? str.tostring(imp_range_bull, "#.##") : "N/A", text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 5, "Bear Range", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 5, not na(imp_range_bear) ? str.tostring(imp_range_bear, "#.##") : "N/A", text_color=color.white, text_size=size.tiny)
 
-// ── WEBHOOK ALERTS ───────────────────────────────────────────
-// Use existing TP/SL for webhook
-wh_buyTP  = buyTP
-wh_buySL  = buySL
-wh_sellTP = sellTP
-wh_sellSL = sellSL
+// ── ALERT CONDITIONS ─────────────────────────────────────────
+alertcondition(longSignal,  title="FibEMAKell BUY",  message="FibEMAKell BOS BUY signal")
+alertcondition(shortSignal, title="FibEMAKell SELL", message="FibEMAKell BOS SELL signal")
 
-wh_buyRR  = buySL != close ? math.abs((wh_buyTP - close) / (close - wh_buySL)) : 0.0
-wh_sellRR = sellSL != close ? math.abs((close - wh_sellTP) / (wh_sellSL - close)) : 0.0
+// ── WEBHOOK JSON ALERTS ──────────────────────────────────────
+if wh_enable and longSignal
+    longJson = '{"indicator_id":"FibEMAKell","action":"BUY","symbol":"' + syminfo.ticker + '","tp1":' + str.tostring(long_tp1, "#.#####") + ',"tp2":' + str.tostring(long_tp2, "#.#####") + ',"tp3":' + str.tostring(long_tp3, "#.#####") + ',"sl":' + str.tostring(long_sl, "#.#####") + '}'
+    alert(longJson, alert.freq_once_per_bar_close)
 
-// alertcondition
-alertcondition(buySignal,  title="FibEMA BUY",  message='{"indicator_id":"FibEMA","strategy_id":"fib_ema_kell_intraday","symbol":"{{ticker}}","action":"BUY","risk":1.0,"meta":{"tp":{{close}},"sl":{{close}},"rr":"0:1"}}')
-alertcondition(sellSignal, title="FibEMA SELL", message='{"indicator_id":"FibEMA","strategy_id":"fib_ema_kell_intraday","symbol":"{{ticker}}","action":"SELL","risk":1.0,"meta":{"tp":{{close}},"sl":{{close}},"rr":"0:1"}}')
-
-// alert() with full JSON payload
-if wh_enable and buySignal
-    wh_buyMsg = '{"indicator_id":"FibEMA","strategy_id":"fib_ema_kell_intraday","symbol":"' + syminfo.ticker + '","action":"BUY","risk":1.0,"meta":{"tp":' + str.tostring(wh_buyTP, "#.#####") + ',"sl":' + str.tostring(wh_buySL, "#.#####") + ',"rr":"' + str.tostring(wh_buyRR, "#.##") + ':1"}}'
-    alert(wh_buyMsg, alert.freq_once_per_bar_close)
-
-if wh_enable and sellSignal
-    wh_sellMsg = '{"indicator_id":"FibEMA","strategy_id":"fib_ema_kell_intraday","symbol":"' + syminfo.ticker + '","action":"SELL","risk":1.0,"meta":{"tp":' + str.tostring(wh_sellTP, "#.#####") + ',"sl":' + str.tostring(wh_sellSL, "#.#####") + ',"rr":"' + str.tostring(wh_sellRR, "#.##") + ':1"}}'
-    alert(wh_sellMsg, alert.freq_once_per_bar_close)
-
-// ── WEBHOOK TP/SL CHART LINES (last bar) ─────────────────────
-if wh_showLines and barstate.islast
-    if buySignal
-        line.new(bar_index - 1, wh_buyTP, bar_index + 5, wh_buyTP, color=color.new(color.aqua, 20), width=2, style=line.style_dotted)
-        line.new(bar_index - 1, wh_buySL, bar_index + 5, wh_buySL, color=color.new(color.fuchsia, 20), width=2, style=line.style_dotted)
-        label.new(bar_index + 5, wh_buyTP, "WH-TP " + str.tostring(wh_buyTP, "#.##"), color=color.new(color.aqua, 80), textcolor=color.aqua, style=label.style_label_left, size=size.tiny)
-        label.new(bar_index + 5, wh_buySL, "WH-SL " + str.tostring(wh_buySL, "#.##"), color=color.new(color.fuchsia, 80), textcolor=color.fuchsia, style=label.style_label_left, size=size.tiny)
-    if sellSignal
-        line.new(bar_index - 1, wh_sellTP, bar_index + 5, wh_sellTP, color=color.new(color.aqua, 20), width=2, style=line.style_dotted)
-        line.new(bar_index - 1, wh_sellSL, bar_index + 5, wh_sellSL, color=color.new(color.fuchsia, 20), width=2, style=line.style_dotted)
-        label.new(bar_index + 5, wh_sellTP, "WH-TP " + str.tostring(wh_sellTP, "#.##"), color=color.new(color.aqua, 80), textcolor=color.aqua, style=label.style_label_left, size=size.tiny)
-        label.new(bar_index + 5, wh_sellSL, "WH-SL " + str.tostring(wh_sellSL, "#.##"), color=color.new(color.fuchsia, 80), textcolor=color.fuchsia, style=label.style_label_left, size=size.tiny)
+if wh_enable and shortSignal
+    shortJson = '{"indicator_id":"FibEMAKell","action":"SELL","symbol":"' + syminfo.ticker + '","tp1":' + str.tostring(short_tp1, "#.#####") + ',"tp2":' + str.tostring(short_tp2, "#.#####") + ',"tp3":' + str.tostring(short_tp3, "#.#####") + ',"sl":' + str.tostring(short_sl, "#.#####") + '}'
+    alert(shortJson, alert.freq_once_per_bar_close)

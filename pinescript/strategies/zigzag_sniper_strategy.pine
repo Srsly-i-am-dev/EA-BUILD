@@ -1,6 +1,6 @@
 //@version=5
-strategy("Zigzag Sniper [Strategy]", shorttitle="ZZSniper_strat", overlay=true,
-         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+strategy("Zigzag Sniper [BOS+Fib Strategy]", shorttitle="ZZSniper_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=10,
          initial_capital=10000, commission_type=strategy.commission.cash_per_order,
          commission_value=0, slippage=2, pyramiding=0,
          calc_on_every_tick=false, process_orders_on_close=true)
@@ -12,12 +12,7 @@ i_hhhlFilter  = input.bool(true,  "HH/HL Filter (Bull)",  group="Pattern")
 i_lhllFilter  = input.bool(true,  "LH/LL Filter (Bear)",  group="Pattern")
 i_minSwingATR = input.float(1.0,  "Min Swing Size (ATR)", group="Pattern", step=0.1)
 i_atrLen      = input.int(14,     "ATR Length",            group="Entry", minval=1)
-i_slMode      = input.string("Swing Level", "SL Mode",    group="TP/SL", options=["Swing Level", "ATR Based"])
-i_slATRMult   = input.float(1.5,  "SL ATR Mult",          group="TP/SL", step=0.1)
-i_tpMode      = input.string("Fib Extension", "TP Mode",  group="TP/SL", options=["Fib Extension", "ATR Based", "R:R Based"])
 i_tpFibExt    = input.float(1.618,"TP Fib Extension",     group="TP/SL", step=0.01)
-i_tpATRMult   = input.float(2.5,  "TP ATR Mult",          group="TP/SL", step=0.1)
-i_tpRR        = input.float(2.0,  "TP R:R Ratio",         group="TP/SL", step=0.1)
 i_useSession  = input.bool(true,  "Session Filter",       group="Session")
 
 // ── ZIGZAG ───────────────────────────────────────────────────
@@ -27,7 +22,7 @@ var int[]   zzD = array.new_int(0)
 var int     zzDir = 0
 
 isH = high == ta.highest(high, i_zzLen)
-isL = low == ta.lowest(low, i_zzLen)
+isL = low  == ta.lowest(low, i_zzLen)
 atrVal = ta.atr(i_atrLen)
 
 newPiv = false
@@ -68,64 +63,63 @@ if newPiv
         array.pop(zzB)
         array.pop(zzD)
 
-// ── PATTERN + ENTRIES ────────────────────────────────────────
+// ── BOS DETECTION + ENTRIES ──────────────────────────────────
 inSession = i_useSession ? (hour(time, "UTC") >= 7 and hour(time, "UTC") <= 21) : true
 
-if newPiv and array.size(zzP) >= 4 and inSession
-    p0 = array.get(zzP, 0)
-    p1 = array.get(zzP, 1)
-    p2 = array.get(zzP, 2)
-    p3 = array.get(zzP, 3)
-    d0 = array.get(zzD, 0)
-    swingSize = math.abs(p0 - p1)
-    validSize = swingSize >= atrVal * i_minSwingATR
+if array.size(zzP) >= 6 and inSession
+    // Find last LH, LL, HL, HH from zigzag pivots
+    float lastLH = na
+    float lastLL = na
+    float lastHL = na
+    float lastHH = na
 
-    // Bull: HH+HL, latest is low
-    bullPattern = d0 == -1 and p1 > p3 and p0 > p2
-    bearPattern = d0 == 1 and p1 < p3 and p0 < p2
+    for i = 0 to math.min(array.size(zzP) - 1, 9)
+        float prc = array.get(zzP, i)
+        int   dir = array.get(zzD, i)
+        if dir == 1
+            if i + 2 < array.size(zzP)
+                float prevHigh = na
+                for j = i + 1 to math.min(array.size(zzP) - 1, i + 4)
+                    if array.get(zzD, j) == 1
+                        prevHigh := array.get(zzP, j)
+                        break
+                if not na(prevHigh)
+                    if prc < prevHigh and na(lastLH)
+                        lastLH := prc
+                    if prc > prevHigh and na(lastHH)
+                        lastHH := prc
+        if dir == -1
+            if i + 2 < array.size(zzP)
+                float prevLow = na
+                for j = i + 1 to math.min(array.size(zzP) - 1, i + 4)
+                    if array.get(zzD, j) == -1
+                        prevLow := array.get(zzP, j)
+                        break
+                if not na(prevLow)
+                    if prc < prevLow and na(lastLL)
+                        lastLL := prc
+                    if prc > prevLow and na(lastHL)
+                        lastHL := prc
 
-    bullOK = (not i_hhhlFilter or bullPattern) and d0 == -1 and validSize
-    bearOK = (not i_lhllFilter or bearPattern) and d0 == 1 and validSize
+    // Bullish BOS: close breaks above lastLH
+    if not na(lastLH) and not na(lastLL) and close > lastLH and close[1] <= lastLH
+        impulseRange = math.abs(high - lastLL)
+        validSize = impulseRange >= atrVal * i_minSwingATR
+        if validSize
+            fib786 = high - impulseRange * 0.786  // SL = 0.786 invalidation
+            tp     = lastLL + impulseRange * i_tpFibExt
+            strategy.entry("Long", strategy.long)
+            strategy.exit("Long Exit", "Long", stop=fib786, limit=tp)
 
-    if bullOK
-        float sl = na
-        if i_slMode == "Swing Level"
-            sl := p0 - atrVal * 0.2
-        else
-            sl := close - atrVal * i_slATRMult
-        slDist = math.abs(close - sl)
-
-        float tp = na
-        if i_tpMode == "Fib Extension"
-            abR = math.abs(p1 - p2)
-            tp := p0 + abR * i_tpFibExt
-        else if i_tpMode == "ATR Based"
-            tp := close + atrVal * i_tpATRMult
-        else
-            tp := close + slDist * i_tpRR
-
-        strategy.entry("Long", strategy.long)
-        strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
-
-    if bearOK
-        float sl = na
-        if i_slMode == "Swing Level"
-            sl := p0 + atrVal * 0.2
-        else
-            sl := close + atrVal * i_slATRMult
-        slDist = math.abs(sl - close)
-
-        float tp = na
-        if i_tpMode == "Fib Extension"
-            abR = math.abs(p1 - p2)
-            tp := p0 - abR * i_tpFibExt
-        else if i_tpMode == "ATR Based"
-            tp := close - atrVal * i_tpATRMult
-        else
-            tp := close - slDist * i_tpRR
-
-        strategy.entry("Short", strategy.short)
-        strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+    // Bearish BOS: close breaks below lastHL
+    if not na(lastHL) and not na(lastHH) and close < lastHL and close[1] >= lastHL
+        impulseRange = math.abs(lastHH - low)
+        validSize = impulseRange >= atrVal * i_minSwingATR
+        if validSize
+            fib786 = low + impulseRange * 0.786  // SL = 0.786 invalidation
+            tp     = lastHH - impulseRange * i_tpFibExt
+            strategy.entry("Short", strategy.short)
+            strategy.exit("Short Exit", "Short", stop=fib786, limit=tp)
 
 // ── VISUALS ──────────────────────────────────────────────────
 plot(close, display=display.none)
