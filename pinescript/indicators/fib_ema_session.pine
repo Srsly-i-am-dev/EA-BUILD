@@ -1,0 +1,122 @@
+//@version=5
+indicator("Fib EMA Session", shorttitle="FibEMASess", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ── INPUTS ───────────────────────────────────────────────────
+i_emaFast       = input.int(50,    "EMA Fast",           group="Signal", minval=5)
+i_emaSlow       = input.int(200,   "EMA Slow",           group="Signal", minval=20)
+i_atrPeriod     = input.int(14,    "ATR Period",         group="Signal", minval=1)
+i_swingLookback = input.int(15,    "Swing Lookback",     group="Signal", minval=3)
+i_minImpulseATR = input.float(0.8, "Min Impulse (ATR)",  group="Signal", minval=0.1, step=0.1)
+i_bodyRatio     = input.float(0.4, "Min Body Ratio (ATR)", group="Signal", minval=0.1, step=0.1)
+
+// Session
+i_useSession    = input.bool(true,  "Session Filter",    group="Session")
+i_sessionStart  = input.int(7,      "Session Start (UTC)", group="Session", minval=0, maxval=23)
+i_sessionEnd    = input.int(21,     "Session End (UTC)",   group="Session", minval=0, maxval=23)
+
+// TP/SL
+i_slMult        = input.float(0.8, "SL ATR Mult",       group="TP/SL", step=0.1)
+i_tpMult        = input.float(1.5, "TP ATR Mult",       group="TP/SL", step=0.1)
+i_customSL      = input.float(0.0, "Custom SL (0=auto)", group="TP/SL", step=1.0)
+i_customTP      = input.float(0.0, "Custom TP (0=auto)", group="TP/SL", step=1.0)
+
+// Setup persistence
+i_setupBars     = input.int(3,     "Setup Active Bars",  group="Setup", minval=1, maxval=10)
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+emaFast   = ta.ema(close, i_emaFast)
+emaSlow   = ta.ema(close, i_emaSlow)
+atrVal    = ta.atr(i_atrPeriod)
+
+swingHigh = ta.highest(high, i_swingLookback)
+swingLow  = ta.lowest(low, i_swingLookback)
+impulse   = swingHigh - swingLow
+
+bullTrend = emaFast > emaSlow
+bearTrend = emaFast < emaSlow
+
+bodySize  = math.abs(close - open)
+bullishCandle = close > open and bodySize > atrVal * i_bodyRatio
+bearishCandle = close < open and bodySize > atrVal * i_bodyRatio
+
+impulseValid = impulse >= atrVal * i_minImpulseATR
+
+currentHour = hour(time, "UTC")
+inSession = i_useSession ? (currentHour >= i_sessionStart and currentHour <= i_sessionEnd) : true
+
+// Fib levels
+buyFibHi  = swingHigh - impulse * 0.50
+buyFibLo  = swingHigh - impulse * 0.618
+sellFibLo = swingLow + impulse * 0.50
+sellFibHi = swingLow + impulse * 0.618
+
+priceInBuyZone  = close >= buyFibLo and close <= buyFibHi
+priceInSellZone = close >= sellFibLo and close <= sellFibHi
+
+// ── SETUP TRACKING ───────────────────────────────────────────
+var int bullSetupBar = 0
+var int bearSetupBar = 0
+
+// Detect impulse candle setups
+if bullTrend and impulseValid and bullishCandle and inSession
+    bullSetupBar := bar_index
+
+if bearTrend and impulseValid and bearishCandle and inSession
+    bearSetupBar := bar_index
+
+bullSetupActive = bar_index - bullSetupBar <= i_setupBars and bullSetupBar > 0
+bearSetupActive = bar_index - bearSetupBar <= i_setupBars and bearSetupBar > 0
+
+// ── SIGNALS ──────────────────────────────────────────────────
+buySignal  = bullSetupActive and priceInBuyZone and bullTrend and inSession
+sellSignal = bearSetupActive and priceInSellZone and bearTrend and inSession
+
+// Prevent repeat signals
+var int lastBuyBar  = 0
+var int lastSellBar = 0
+if buySignal and bar_index - lastBuyBar < 5
+    buySignal := false
+if sellSignal and bar_index - lastSellBar < 5
+    sellSignal := false
+if buySignal
+    lastBuyBar := bar_index
+if sellSignal
+    lastSellBar := bar_index
+
+// ── TP/SL ────────────────────────────────────────────────────
+float buySL  = i_customSL > 0 ? close - i_customSL * syminfo.mintick : swingLow - atrVal * i_slMult
+float buyTP  = i_customTP > 0 ? close + i_customTP * syminfo.mintick : swingHigh + atrVal * i_tpMult
+float sellSL = i_customSL > 0 ? close + i_customSL * syminfo.mintick : swingHigh + atrVal * i_slMult
+float sellTP = i_customTP > 0 ? close - i_customTP * syminfo.mintick : swingLow - atrVal * i_tpMult
+
+// ── VISUALS ──────────────────────────────────────────────────
+plot(emaFast, "EMA Fast", color.blue, 1)
+plot(emaSlow, "EMA Slow", color.orange, 1)
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)
+
+// Session background
+sessionColor = inSession ? na : color.new(color.gray, 95)
+bgcolor(sessionColor, title="Out of Session")
+
+if buySignal
+    line.new(bar_index, buyTP, bar_index + 20, buyTP, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
+    line.new(bar_index, buySL, bar_index + 20, buySL, color=color.new(color.red, 30), width=2, style=line.style_dashed)
+
+if sellSignal
+    line.new(bar_index, sellTP, bar_index + 20, sellTP, color=color.new(color.red, 30), width=2, style=line.style_dashed)
+    line.new(bar_index, sellSL, bar_index + 20, sellSL, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
+
+// Info table
+var table tbl = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(tbl, 0, 0, "Fib EMA Session", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, "v1.0", text_color=color.yellow, text_size=size.small)
+    table.cell(tbl, 0, 1, "Trend", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 1, bullTrend ? "BULL" : bearTrend ? "BEAR" : "FLAT", text_color=bullTrend ? color.lime : bearTrend ? color.red : color.gray, text_size=size.tiny)
+    table.cell(tbl, 0, 2, "Session", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 2, inSession ? "ACTIVE" : "CLOSED", text_color=inSession ? color.lime : color.red, text_size=size.tiny)
+    table.cell(tbl, 0, 3, "ATR", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 3, str.tostring(atrVal, "#.#####"), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 4, "Setup", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 4, bullSetupActive ? "BULL" : bearSetupActive ? "BEAR" : "NONE", text_color=bullSetupActive ? color.lime : bearSetupActive ? color.red : color.gray, text_size=size.tiny)

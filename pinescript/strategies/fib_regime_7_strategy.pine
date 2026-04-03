@@ -1,0 +1,85 @@
+//@version=5
+strategy("Fib Regime 7 [Strategy]", shorttitle="FibReg7_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         initial_capital=10000, commission_type=strategy.commission.cash_per_order,
+         commission_value=0, slippage=2, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=true)
+
+// ── INPUTS ───────────────────────────────────────────────────
+i_emaFast       = input.int(50,    "EMA Fast",     group="Signal", minval=5)
+i_emaSlow       = input.int(200,   "EMA Slow",     group="Signal", minval=20)
+i_atrPeriod     = input.int(14,    "ATR Fast",     group="Signal", minval=1)
+i_swingLookback = input.int(14,    "Swing Lookback", group="Signal", minval=3)
+i_minImpulseATR = input.float(0.9, "Min Impulse",  group="Signal", minval=0.1, step=0.1)
+i_impulseBody   = input.float(0.55,"Body Ratio",   group="Signal", minval=0.1, step=0.1)
+i_regimeEnabled = input.bool(true, "Regime Blocker", group="Regime")
+i_atrSlowPeriod = input.int(50,    "ATR Slow",     group="Regime", minval=10)
+i_minVolRatio   = input.float(0.80,"Min Vol Ratio", group="Regime", step=0.05)
+i_slopeLookback = input.int(10,    "Slope Lookback", group="Regime", minval=2)
+i_minSlopeNorm  = input.float(0.30,"Min Slope",    group="Regime", step=0.05)
+i_volAdaptive   = input.bool(true, "Vol-Adaptive",  group="Vol Scaler")
+i_volClampMin   = input.float(0.80,"Clamp Min",    group="Vol Scaler", step=0.05)
+i_volClampMax   = input.float(1.40,"Clamp Max",    group="Vol Scaler", step=0.05)
+i_slMult        = input.float(0.85,"SL Mult",      group="TP/SL", step=0.05)
+i_tpMult        = input.float(1.90,"TP Mult",      group="TP/SL", step=0.05)
+i_minSLPips     = input.float(10.0,"Min SL",       group="Guardrails", step=1)
+i_maxSLPips     = input.float(500.0,"Max SL",      group="Guardrails", step=10)
+i_minTPPips     = input.float(15.0,"Min TP",       group="Guardrails", step=1)
+i_maxTPPips     = input.float(1000.0,"Max TP",     group="Guardrails", step=10)
+i_maxRR         = input.float(6.0, "Max R:R",      group="Guardrails", step=0.5)
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+emaFast  = ta.ema(close, i_emaFast)
+emaSlow  = ta.ema(close, i_emaSlow)
+atrFast  = ta.atr(i_atrPeriod)
+atrSlow  = ta.atr(i_atrSlowPeriod)
+swingHigh = ta.highest(high, i_swingLookback)
+swingLow  = ta.lowest(low, i_swingLookback)
+impulse   = swingHigh - swingLow
+bodyRatio = (high - low) > 0 ? math.abs(close - open) / (high - low) : 0
+volRatio  = atrSlow > 0 ? atrFast / atrSlow : 0
+slopeNorm = atrFast > 0 ? math.abs((emaFast - emaFast[i_slopeLookback]) / i_slopeLookback) / atrFast : 0
+regimeOK  = not i_regimeEnabled or (volRatio >= i_minVolRatio and slopeNorm >= i_minSlopeNorm)
+volFactor = 1.0
+if i_volAdaptive and atrSlow > 0
+    volFactor := math.max(i_volClampMin, math.min(i_volClampMax, atrFast / atrSlow))
+
+buyFibHi  = swingHigh - impulse * 0.50
+buyFibLo  = swingHigh - impulse * 0.618
+sellFibLo = swingLow + impulse * 0.50
+sellFibHi = swingLow + impulse * 0.618
+inSession = hour(time, "UTC") >= 7 and hour(time, "UTC") <= 21
+
+buySignal  = emaFast > emaSlow and impulse >= atrFast * i_minImpulseATR and close > open and bodyRatio >= i_impulseBody and close >= buyFibLo and close <= buyFibHi and inSession and regimeOK
+sellSignal = emaFast < emaSlow and impulse >= atrFast * i_minImpulseATR and close < open and bodyRatio >= i_impulseBody and close >= sellFibLo and close <= sellFibHi and inSession and regimeOK
+
+// Guardrailed TP/SL
+origBuySL  = (close - (swingLow - atrFast * 0.8)) * i_slMult * volFactor
+origBuyTP  = ((swingHigh + atrFast * 1.5) - close) * i_tpMult * volFactor
+origSellSL = ((swingHigh + atrFast * 0.8) - close) * i_slMult * volFactor
+origSellTP = (close - (swingLow - atrFast * 1.5)) * i_tpMult * volFactor
+
+buySL_c  = math.max(i_minSLPips, math.min(i_maxSLPips, origBuySL))
+buyTP_c  = math.max(i_minTPPips, math.min(i_maxTPPips, origBuyTP))
+sellSL_c = math.max(i_minSLPips, math.min(i_maxSLPips, origSellSL))
+sellTP_c = math.max(i_minTPPips, math.min(i_maxTPPips, origSellTP))
+
+if buySL_c > 0 and buyTP_c / buySL_c > i_maxRR
+    buyTP_c := buySL_c * i_maxRR
+if sellSL_c > 0 and sellTP_c / sellSL_c > i_maxRR
+    sellTP_c := sellSL_c * i_maxRR
+
+// ── STRATEGY ENTRIES ─────────────────────────────────────────
+if buySignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=close - buySL_c, limit=close + buyTP_c)
+
+if sellSignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=close + sellSL_c, limit=close - sellTP_c)
+
+// ── VISUALS ──────────────────────────────────────────────────
+plot(emaFast, "EMA Fast", color.blue, 1)
+plot(emaSlow, "EMA Slow", color.orange, 1)
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)

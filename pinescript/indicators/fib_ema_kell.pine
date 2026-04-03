@@ -1,0 +1,126 @@
+//@version=5
+indicator("Fib EMA Kell Intraday", shorttitle="FibEMA", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ── INPUTS ───────────────────────────────────────────────────
+// Signal Parameters
+i_emaFast       = input.int(50,    "EMA Fast Period",          group="Signal", minval=5)
+i_emaSlow       = input.int(200,   "EMA Slow Period",          group="Signal", minval=20)
+i_atrPeriod     = input.int(14,    "ATR Period",               group="Signal", minval=1)
+i_swingLookback = input.int(15,    "Swing Lookback Bars",      group="Signal", minval=3)
+i_minImpulseATR = input.float(0.8, "Min Impulse (ATR mult)",   group="Signal", minval=0.1, step=0.1)
+i_impulseBody   = input.float(0.4, "Min Impulse Body (ATR mult)", group="Signal", minval=0.1, step=0.1)
+
+// Fibonacci Zone
+i_fibUpper      = input.float(0.618, "Fib Upper Level",        group="Fibonacci", minval=0.1, maxval=1.0, step=0.01)
+i_fibLower      = input.float(0.50,  "Fib Lower Level",        group="Fibonacci", minval=0.1, maxval=1.0, step=0.01)
+
+// TP/SL
+i_slMult        = input.float(0.8, "SL ATR Multiplier",        group="TP/SL", minval=0.1, step=0.1)
+i_tpMult        = input.float(1.5, "TP ATR Multiplier",        group="TP/SL", minval=0.1, step=0.1)
+
+// Session Filter
+i_useSession    = input.bool(true,  "Use Session Filter",      group="Session")
+i_sessionStart  = input.int(7,      "Session Start Hour (UTC)", group="Session", minval=0, maxval=23)
+i_sessionEnd    = input.int(21,     "Session End Hour (UTC)",   group="Session", minval=0, maxval=23)
+
+// Setup Expiry
+i_setupBars     = input.int(3,      "Setup Valid Bars",         group="Setup", minval=1, maxval=10)
+
+// Visuals
+i_showFibZone   = input.bool(true,  "Show Fib Zone",           group="Display")
+i_showTPSL      = input.bool(true,  "Show TP/SL Levels",       group="Display")
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+emaFast = ta.ema(close, i_emaFast)
+emaSlow = ta.ema(close, i_emaSlow)
+atrVal  = ta.atr(i_atrPeriod)
+
+// Trend direction
+bullishTrend = emaFast > emaSlow
+bearishTrend = emaFast < emaSlow
+
+// Swing high/low over lookback period
+swingHigh = ta.highest(high, i_swingLookback)
+swingLow  = ta.lowest(low, i_swingLookback)
+impulse   = swingHigh - swingLow
+
+// Impulse validation
+impulseValid = impulse >= atrVal * i_minImpulseATR
+
+// Impulse candle check
+bullishImpulseCandle = close > open and (close - open) > atrVal * i_impulseBody
+bearishImpulseCandle = close < open and (open - close) > atrVal * i_impulseBody
+
+// Session filter
+currentHour = hour(time, "UTC")
+inSession = i_useSession ? (currentHour >= i_sessionStart and currentHour <= i_sessionEnd) : true
+
+// ── FIBONACCI ZONE CALCULATION ───────────────────────────────
+// Buy setup: fib retracement of bullish impulse (measured from swing high)
+buyFibUpper = swingHigh - impulse * i_fibLower   // 0.50 level (higher price)
+buyFibLower = swingHigh - impulse * i_fibUpper   // 0.618 level (lower price)
+
+// Sell setup: fib retracement of bearish impulse (measured from swing low)
+sellFibLower = swingLow + impulse * i_fibLower   // 0.50 level (lower price)
+sellFibUpper = swingLow + impulse * i_fibUpper   // 0.618 level (higher price)
+
+// Price in fib zone check
+priceInBuyZone  = close >= buyFibLower and close <= buyFibUpper
+priceInSellZone = close >= sellFibLower and close <= sellFibUpper
+
+// ── SIGNAL GENERATION ────────────────────────────────────────
+// Buy: bullish trend + valid impulse + bullish candle + price in fib zone + in session
+buySignal  = bullishTrend and impulseValid and bullishImpulseCandle and priceInBuyZone and inSession
+sellSignal = bearishTrend and impulseValid and bearishImpulseCandle and priceInSellZone and inSession
+
+// ── TP/SL LEVELS ─────────────────────────────────────────────
+buyTP  = swingHigh + atrVal * i_tpMult
+buySL  = swingLow - atrVal * i_slMult
+sellTP = swingLow - atrVal * i_tpMult
+sellSL = swingHigh + atrVal * i_slMult
+
+// ── VISUALS ──────────────────────────────────────────────────
+// EMA plots
+plot(emaFast, "EMA Fast", color=color.new(color.blue, 0), linewidth=1)
+plot(emaSlow, "EMA Slow", color=color.new(color.orange, 0), linewidth=1)
+
+// Signal arrows
+plotshape(buySignal,  "Buy Signal",  shape.triangleup,   location.belowbar, color.lime,  size=size.small)
+plotshape(sellSignal, "Sell Signal", shape.triangledown,  location.abovebar, color.red,   size=size.small)
+
+// TP/SL lines on signal bars
+if i_showTPSL and buySignal
+    line.new(bar_index, buyTP, bar_index + 20, buyTP, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
+    line.new(bar_index, buySL, bar_index + 20, buySL, color=color.new(color.red, 30), width=2, style=line.style_dashed)
+    label.new(bar_index + 10, buyTP, "TP: " + str.tostring(buyTP, "#.##"), color=color.new(color.lime, 70), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+    label.new(bar_index + 10, buySL, "SL: " + str.tostring(buySL, "#.##"), color=color.new(color.red, 70), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+
+if i_showTPSL and sellSignal
+    line.new(bar_index, sellTP, bar_index + 20, sellTP, color=color.new(color.red, 30), width=2, style=line.style_dashed)
+    line.new(bar_index, sellSL, bar_index + 20, sellSL, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
+    label.new(bar_index + 10, sellTP, "TP: " + str.tostring(sellTP, "#.##"), color=color.new(color.red, 70), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+    label.new(bar_index + 10, sellSL, "SL: " + str.tostring(sellSL, "#.##"), color=color.new(color.lime, 70), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+
+// Fib zone shading
+var box buyZoneBox = na
+var box sellZoneBox = na
+
+if i_showFibZone and buySignal
+    buyZoneBox := box.new(bar_index - i_swingLookback, buyFibUpper, bar_index, buyFibLower, border_color=color.new(color.lime, 60), bgcolor=color.new(color.lime, 90))
+
+if i_showFibZone and sellSignal
+    sellZoneBox := box.new(bar_index - i_swingLookback, sellFibUpper, bar_index, sellFibLower, border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 90))
+
+// ── INFO TABLE ───────────────────────────────────────────────
+var table infoTable = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Fib EMA Kell", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, "", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 0, 1, "Trend", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 1, bullishTrend ? "BULLISH" : bearishTrend ? "BEARISH" : "NEUTRAL", text_color=bullishTrend ? color.lime : bearishTrend ? color.red : color.gray, text_size=size.tiny)
+    table.cell(infoTable, 0, 2, "ATR", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 2, str.tostring(atrVal, "#.##"), text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 3, "Impulse", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 3, str.tostring(impulse, "#.##"), text_color=impulseValid ? color.lime : color.red, text_size=size.tiny)
+    table.cell(infoTable, 0, 4, "Session", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 4, inSession ? "ACTIVE" : "CLOSED", text_color=inSession ? color.lime : color.red, text_size=size.tiny)

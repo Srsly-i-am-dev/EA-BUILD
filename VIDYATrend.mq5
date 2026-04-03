@@ -127,7 +127,9 @@ void OnTick()
 
    //--- TP/SL
    double entry_price = (signal == DIR_BUY) ? g_sym.Ask() : g_sym.Bid();
-   if(!g_tp.Calculate(g_indicators, g_sym, entry_price, signal))
+   CBollingerCalc dummy_bb;
+   dummy_bb.Init(2.0);
+   if(!g_tp.Calculate(g_indicators, g_sym, dummy_bb, entry_price, signal))
    {
       g_log.Debug("TP/SL skipped: R:R below minimum");
       return;

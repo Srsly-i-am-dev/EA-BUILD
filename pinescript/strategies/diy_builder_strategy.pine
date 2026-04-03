@@ -1,0 +1,164 @@
+//@version=5
+strategy("DIY Confluence Builder [Strategy]", shorttitle="DIYConf_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         initial_capital=10000, commission_type=strategy.commission.cash_per_order,
+         commission_value=0, slippage=2, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=true)
+
+// ── INPUTS ───────────────────────────────────────────────────
+i_leadingType   = input.string("Supertrend", "Leading Indicator", group="Leading",
+     options=["Supertrend", "2 EMA Cross", "3 EMA Cross", "MACD", "RSI", "Stochastic", "Hull Suite", "Donchian", "Range Filter", "Half Trend", "VWAP"])
+i_stFactor      = input.float(3.0,  "Supertrend Factor",  group="Leading", step=0.1)
+i_stPeriod      = input.int(10,     "Supertrend Period",   group="Leading", minval=1)
+i_ema2Fast      = input.int(50,     "2EMA Fast",           group="Leading", minval=1)
+i_ema2Slow      = input.int(200,    "2EMA Slow",           group="Leading", minval=1)
+i_ema3A         = input.int(9,      "3EMA A",              group="Leading", minval=1)
+i_ema3B         = input.int(21,     "3EMA B",              group="Leading", minval=1)
+i_ema3C         = input.int(55,     "3EMA C",              group="Leading", minval=1)
+i_macdFast      = input.int(12,     "MACD Fast",           group="Leading", minval=1)
+i_macdSlow      = input.int(26,     "MACD Slow",           group="Leading", minval=1)
+i_macdSignal    = input.int(9,      "MACD Signal",         group="Leading", minval=1)
+i_rsiLen        = input.int(14,     "RSI Length",           group="Leading", minval=1)
+i_rsiOB         = input.int(70,     "RSI OB",              group="Leading", minval=50)
+i_rsiOS         = input.int(30,     "RSI OS",              group="Leading", maxval=50)
+i_stochK        = input.int(14,     "Stoch K",             group="Leading", minval=1)
+i_stochD        = input.int(3,      "Stoch D",             group="Leading", minval=1)
+i_stochSmooth   = input.int(3,      "Stoch Smooth",        group="Leading", minval=1)
+i_hullLen       = input.int(55,     "Hull Length",          group="Leading", minval=1)
+i_donchLen      = input.int(20,     "Donchian Length",      group="Leading", minval=1)
+
+i_useEMAFilter  = input.bool(true,  "EMA 200 Filter",      group="Confirmation")
+i_emaFilterLen  = input.int(200,    "EMA Filter Length",    group="Confirmation", minval=1)
+i_useADX        = input.bool(false, "ADX Filter",           group="Confirmation")
+i_adxLen        = input.int(14,     "ADX Length",            group="Confirmation", minval=1)
+i_adxThresh     = input.int(25,     "ADX Threshold",         group="Confirmation", minval=1)
+i_useVolume     = input.bool(false, "Volume Filter",         group="Confirmation")
+i_volLen        = input.int(20,     "Volume MA Length",       group="Confirmation", minval=1)
+i_useSession    = input.bool(true,  "Session Filter",        group="Confirmation")
+i_sessionStart  = input.int(7,      "Session Start UTC",     group="Confirmation", minval=0, maxval=23)
+i_sessionEnd    = input.int(21,     "Session End UTC",       group="Confirmation", minval=0, maxval=23)
+
+i_signalExpiry  = input.int(3,      "Signal Expiry (bars)", group="Setup", minval=1)
+i_alternateOnly = input.bool(true,  "Alternate Signals",   group="Setup")
+i_atrLen        = input.int(14,     "ATR Length",           group="TP/SL", minval=1)
+i_slATRMult     = input.float(1.5,  "SL ATR Mult",         group="TP/SL", step=0.1)
+i_tpATRMult     = input.float(2.5,  "TP ATR Mult",         group="TP/SL", step=0.1)
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+atrVal = ta.atr(i_atrLen)
+
+[stUp, stDir] = ta.supertrend(i_stFactor, i_stPeriod)
+ema2F = ta.ema(close, i_ema2Fast)
+ema2S = ta.ema(close, i_ema2Slow)
+ema3A = ta.ema(close, i_ema3A)
+ema3B = ta.ema(close, i_ema3B)
+ema3C = ta.ema(close, i_ema3C)
+[macdLine, signalLine, histLine] = ta.macd(close, i_macdFast, i_macdSlow, i_macdSignal)
+rsiVal = ta.rsi(close, i_rsiLen)
+stochK = ta.sma(ta.stoch(close, high, low, i_stochK), i_stochSmooth)
+stochD = ta.sma(stochK, i_stochD)
+hullMA = ta.wma(2 * ta.wma(close, i_hullLen / 2) - ta.wma(close, i_hullLen), math.round(math.sqrt(i_hullLen)))
+donchUp = ta.highest(high, i_donchLen)
+donchDn = ta.lowest(low, i_donchLen)
+rfSmooth = ta.ema(close, 27)
+rfRange  = ta.ema(ta.atr(27) * 2.618, 27)
+dailyVwap = ta.vwap(hlc3)
+var int htDir = 0
+htH = ta.highest(low, 2)
+htL = ta.lowest(high, 2)
+if close > htH[1]
+    htDir := 1
+if close < htL[1]
+    htDir := -1
+
+// Leading signal
+leadLong  = false
+leadShort = false
+if i_leadingType == "Supertrend"
+    leadLong  := stDir < 0 and not (stDir[1] < 0)
+    leadShort := stDir > 0 and not (stDir[1] > 0)
+else if i_leadingType == "2 EMA Cross"
+    leadLong  := ta.crossover(ema2F, ema2S)
+    leadShort := ta.crossunder(ema2F, ema2S)
+else if i_leadingType == "3 EMA Cross"
+    ema3L = ema3A > ema3B and ema3B > ema3C
+    ema3S = ema3A < ema3B and ema3B < ema3C
+    leadLong  := ema3L and not ema3L[1]
+    leadShort := ema3S and not ema3S[1]
+else if i_leadingType == "MACD"
+    leadLong  := ta.crossover(macdLine, signalLine)
+    leadShort := ta.crossunder(macdLine, signalLine)
+else if i_leadingType == "RSI"
+    leadLong  := ta.crossover(rsiVal, i_rsiOS)
+    leadShort := ta.crossunder(rsiVal, i_rsiOB)
+else if i_leadingType == "Stochastic"
+    leadLong  := ta.crossover(stochK, stochD) and stochK < 20
+    leadShort := ta.crossunder(stochK, stochD) and stochK > 80
+else if i_leadingType == "Hull Suite"
+    hL = close > hullMA
+    leadLong  := hL and not hL[1]
+    hS = close < hullMA
+    leadShort := hS and not hS[1]
+else if i_leadingType == "Donchian"
+    leadLong  := close >= donchUp[1]
+    leadShort := close <= donchDn[1]
+else if i_leadingType == "Range Filter"
+    rfU = close > rfSmooth + rfRange
+    rfD = close < rfSmooth - rfRange
+    leadLong  := rfU and not rfU[1]
+    leadShort := rfD and not rfD[1]
+else if i_leadingType == "Half Trend"
+    leadLong  := htDir == 1 and htDir[1] != 1
+    leadShort := htDir == -1 and htDir[1] != -1
+else if i_leadingType == "VWAP"
+    leadLong  := ta.crossover(close, dailyVwap)
+    leadShort := ta.crossunder(close, dailyVwap)
+
+// Expiry
+var int llc = 0
+var int lsc = 0
+if leadLong
+    llc := i_signalExpiry
+if leadShort
+    lsc := i_signalExpiry
+llActive = llc > 0
+lsActive = lsc > 0
+llc := math.max(0, llc - 1)
+lsc := math.max(0, lsc - 1)
+
+// Confirmation
+emaF = ta.ema(close, i_emaFilterLen)
+emaLong  = not i_useEMAFilter or close > emaF
+emaShort = not i_useEMAFilter or close < emaF
+[diP, diM, adxV] = ta.dmi(i_adxLen, i_adxLen)
+adxOK    = not i_useADX or adxV >= i_adxThresh
+volMA    = ta.sma(volume, i_volLen)
+volOK    = not i_useVolume or volume > volMA
+curH     = hour(time, "UTC")
+sessOK   = not i_useSession or (curH >= i_sessionStart and curH <= i_sessionEnd)
+
+longCond  = llActive and emaLong and adxOK and volOK and sessOK
+shortCond = lsActive and emaShort and adxOK and volOK and sessOK
+
+var int condIni = 0
+if longCond
+    condIni := 1
+if shortCond
+    condIni := -1
+
+buySignal  = longCond and (not i_alternateOnly or condIni[1] == -1 or condIni[1] == 0)
+sellSignal = shortCond and (not i_alternateOnly or condIni[1] == 1 or condIni[1] == 0)
+
+// ── ENTRIES ──────────────────────────────────────────────────
+if buySignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=close - atrVal * i_slATRMult, limit=close + atrVal * i_tpATRMult)
+
+if sellSignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=close + atrVal * i_slATRMult, limit=close - atrVal * i_tpATRMult)
+
+// ── VISUALS ──────────────────────────────────────────────────
+plot(i_useEMAFilter ? emaF : na, "EMA Filter", color.gray, 1)
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)

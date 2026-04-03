@@ -1,0 +1,67 @@
+//@version=5
+strategy("ABC Pattern Enhanced [Strategy]", shorttitle="ABC_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         initial_capital=10000, commission_type=strategy.commission.cash_per_order,
+         commission_value=0, slippage=2, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=true, max_lines_count=500, max_labels_count=500)
+
+// ── INPUTS ──────────────────────────────────────────────────
+lookback      = input.int(10,    "Pivot Lookback",  minval=2, maxval=50)
+bullSLPercent = input.float(0.5, "Bull SL: % below C", minval=0.1, maxval=5.0, step=0.1)
+bearSLPercent = input.float(0.5, "Bear SL: % above C", minval=0.1, maxval=5.0, step=0.1)
+
+// ── PIVOTS ───────────────────────────────────────────────────
+ph = ta.pivothigh(high, lookback, lookback)
+pl = ta.pivotlow(low,   lookback, lookback)
+
+var float ph1 = na, var float ph2 = na
+var float pl1 = na, var float pl2 = na
+var int ph1b = na,  var int ph2b = na
+var int pl1b = na,  var int pl2b = na
+
+if not na(ph)
+    ph2  := ph1,  ph2b := ph1b
+    ph1  := ph,   ph1b := bar_index - lookback
+
+if not na(pl)
+    pl2  := pl1,  pl2b := pl1b
+    pl1  := pl,   pl1b := bar_index - lookback
+
+// ── BULLISH ABC ──────────────────────────────────────────────
+bul = not na(pl2) and not na(ph1) and not na(pl1) and pl2b < ph1b and ph1b < pl1b and pl1 > pl2 and ph1 > pl2 and ph1 > pl1
+bA  = bul ? pl2 : float(na)
+bB  = bul ? ph1 : float(na)
+bC  = bul ? pl1 : float(na)
+bT  = bul ? (bB * bC) / bA : float(na)
+
+// ── BEARISH ABC ──────────────────────────────────────────────
+ber = not na(ph2) and not na(pl1) and not na(ph1) and ph2b < pl1b and pl1b < ph1b and ph1 < ph2 and pl1 < ph2 and pl1 < ph1
+eA  = ber ? ph2 : float(na)
+eB  = ber ? pl1 : float(na)
+eC  = ber ? ph1 : float(na)
+eT  = ber ? (eB * eC) / eA : float(na)
+
+// ── SIGNALS ──────────────────────────────────────────────────
+bullCSignal = bul[1] and not bul[2] and bul and bC == bC[1]
+bearCSignal = ber[1] and not ber[2] and ber and eC == eC[1]
+
+// ── TP/SL ────────────────────────────────────────────────────
+bullTP = bT
+bullSL = bC * (1 - bullSLPercent / 100)
+bearTP = eT
+bearSL = eC * (1 + bearSLPercent / 100)
+
+// ── STRATEGY ENTRIES ─────────────────────────────────────────
+if bullCSignal and not na(bullTP) and not na(bullSL)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=bullSL, limit=bullTP)
+
+if bearCSignal and not na(bearTP) and not na(bearSL)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=bearSL, limit=bearTP)
+
+// ── VISUALS ──────────────────────────────────────────────────
+plotshape(bullCSignal, "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(bearCSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)
+plot(bul ? bT : na, "Bull Target", color.yellow, 1, plot.style_circles)
+plot(ber ? eT : na, "Bear Target", color.yellow, 1, plot.style_circles)

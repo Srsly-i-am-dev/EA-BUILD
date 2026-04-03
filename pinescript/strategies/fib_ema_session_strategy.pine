@@ -1,0 +1,88 @@
+//@version=5
+strategy("Fib EMA Session [Strategy]", shorttitle="FibEMASess_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         initial_capital=10000, commission_type=strategy.commission.cash_per_order,
+         commission_value=0, slippage=2, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=true)
+
+// ── INPUTS ───────────────────────────────────────────────────
+i_emaFast       = input.int(50,    "EMA Fast",           group="Signal", minval=5)
+i_emaSlow       = input.int(200,   "EMA Slow",           group="Signal", minval=20)
+i_atrPeriod     = input.int(14,    "ATR Period",         group="Signal", minval=1)
+i_swingLookback = input.int(15,    "Swing Lookback",     group="Signal", minval=3)
+i_minImpulseATR = input.float(0.8, "Min Impulse (ATR)",  group="Signal", step=0.1)
+i_bodyRatio     = input.float(0.4, "Body Ratio (ATR)",   group="Signal", step=0.1)
+i_useSession    = input.bool(true, "Session Filter",     group="Session")
+i_sessionStart  = input.int(7,     "Session Start UTC",  group="Session", minval=0, maxval=23)
+i_sessionEnd    = input.int(21,    "Session End UTC",    group="Session", minval=0, maxval=23)
+i_slMult        = input.float(0.8, "SL ATR Mult",       group="TP/SL", step=0.1)
+i_tpMult        = input.float(1.5, "TP ATR Mult",       group="TP/SL", step=0.1)
+i_setupBars     = input.int(3,     "Setup Active Bars",  group="Setup", minval=1)
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+emaFast   = ta.ema(close, i_emaFast)
+emaSlow   = ta.ema(close, i_emaSlow)
+atrVal    = ta.atr(i_atrPeriod)
+swingHigh = ta.highest(high, i_swingLookback)
+swingLow  = ta.lowest(low, i_swingLookback)
+impulse   = swingHigh - swingLow
+
+bullTrend = emaFast > emaSlow
+bearTrend = emaFast < emaSlow
+bodySize  = math.abs(close - open)
+bullishCandle = close > open and bodySize > atrVal * i_bodyRatio
+bearishCandle = close < open and bodySize > atrVal * i_bodyRatio
+impulseValid = impulse >= atrVal * i_minImpulseATR
+
+currentHour = hour(time, "UTC")
+inSession = i_useSession ? (currentHour >= i_sessionStart and currentHour <= i_sessionEnd) : true
+
+buyFibHi  = swingHigh - impulse * 0.50
+buyFibLo  = swingHigh - impulse * 0.618
+sellFibLo = swingLow + impulse * 0.50
+sellFibHi = swingLow + impulse * 0.618
+
+var int bullSetupBar = 0
+var int bearSetupBar = 0
+
+if bullTrend and impulseValid and bullishCandle and inSession
+    bullSetupBar := bar_index
+if bearTrend and impulseValid and bearishCandle and inSession
+    bearSetupBar := bar_index
+
+bullSetupActive = bar_index - bullSetupBar <= i_setupBars and bullSetupBar > 0
+bearSetupActive = bar_index - bearSetupBar <= i_setupBars and bearSetupBar > 0
+
+buySignal  = bullSetupActive and close >= buyFibLo and close <= buyFibHi and bullTrend and inSession
+sellSignal = bearSetupActive and close >= sellFibLo and close <= sellFibHi and bearTrend and inSession
+
+// Prevent repeat
+var int lastBuyBar  = 0
+var int lastSellBar = 0
+if buySignal and bar_index - lastBuyBar < 5
+    buySignal := false
+if sellSignal and bar_index - lastSellBar < 5
+    sellSignal := false
+if buySignal
+    lastBuyBar := bar_index
+if sellSignal
+    lastSellBar := bar_index
+
+// ── STRATEGY ENTRIES ─────────────────────────────────────────
+if buySignal
+    sl = swingLow - atrVal * i_slMult
+    tp = swingHigh + atrVal * i_tpMult
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+
+if sellSignal
+    sl = swingHigh + atrVal * i_slMult
+    tp = swingLow - atrVal * i_tpMult
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+
+// ── VISUALS ──────────────────────────────────────────────────
+plot(emaFast, "EMA Fast", color.blue, 1)
+plot(emaSlow, "EMA Slow", color.orange, 1)
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)

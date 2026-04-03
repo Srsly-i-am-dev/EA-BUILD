@@ -1,0 +1,135 @@
+//@version=5
+indicator("MACD Money Map", shorttitle="MACDMoney", overlay=false)
+
+// ── INPUTS ───────────────────────────────────────────────────
+// MACD Parameters
+i_fastLen  = input.int(12,  "MACD Fast Length",    group="MACD", minval=1)
+i_slowLen  = input.int(26,  "MACD Slow Length",    group="MACD", minval=1)
+i_sigLen   = input.int(9,   "Signal Line Length",  group="MACD", minval=1)
+i_src      = input.source(close, "Source",         group="MACD")
+
+// System Selection
+i_system   = input.string("System 1: Trend", "Active System", options=["System 1: Trend", "System 2: Reversal", "System 3: MTF Confirmation"], group="System")
+
+// System 1 Parameters
+i_distRule = input.float(0.5, "Zero Line Distance (System 1)", group="System 1", minval=0.0, step=0.1)
+i_confirmBars = input.int(2, "Confirmation Bars After Cross",  group="System 1", minval=0, maxval=5)
+
+// System 2 Parameters
+i_divLookback = input.int(30, "Divergence Lookback", group="System 2", minval=10, maxval=100)
+
+// System 3 Parameters (MTF)
+i_htfTrend  = input.timeframe("D",   "Trend TF (Daily)",   group="System 3")
+i_htfSetup  = input.timeframe("240", "Setup TF (4H)",      group="System 3")
+
+// TP/SL
+i_atrLen   = input.int(14,    "ATR Length",        group="TP/SL", minval=1)
+i_rrTarget = input.float(2.0, "Risk:Reward Target", group="TP/SL", minval=0.5, step=0.5)
+
+// ── MACD CALCULATION ─────────────────────────────────────────
+[macdLine, signalLine, histLine] = ta.macd(i_src, i_fastLen, i_slowLen, i_sigLen)
+
+// ── SYSTEM 1: TREND (Zero Line + Distance Rule) ──────────────
+macdCrossUp   = ta.crossover(macdLine, signalLine)
+macdCrossDown = ta.crossunder(macdLine, signalLine)
+
+// Distance rule: only trade when MACD is far enough from zero
+s1_buyRaw  = macdCrossUp and macdLine > i_distRule
+s1_sellRaw = macdCrossDown and macdLine < -i_distRule
+
+// Confirmation: wait N bars after cross
+var int s1_buyAge  = 999
+var int s1_sellAge = 999
+s1_buyAge  := s1_buyRaw  ? 0 : s1_buyAge + 1
+s1_sellAge := s1_sellRaw ? 0 : s1_sellAge + 1
+
+s1_buy  = s1_buyAge == i_confirmBars
+s1_sell = s1_sellAge == i_confirmBars
+
+// ── SYSTEM 2: REVERSAL (Divergence + Histogram Flip) ─────────
+// Bullish divergence: price lower low, MACD higher low
+s2_priceLow1 = ta.lowest(low, i_divLookback)
+s2_macdLow1  = ta.lowest(macdLine, i_divLookback)
+
+// Histogram flip detection
+histFlipBull = histLine > 0 and histLine[1] <= 0
+histFlipBear = histLine < 0 and histLine[1] >= 0
+
+// Shrinking histogram tower
+histShrinkBull = histLine < 0 and histLine > histLine[1]
+histShrinkBear = histLine > 0 and histLine < histLine[1]
+
+// Simple divergence detection
+var bool bullDiv = false
+var bool bearDiv = false
+
+// Check for bullish divergence: price making lower low but MACD making higher low
+if low <= s2_priceLow1[1] and macdLine > s2_macdLow1[1] and macdLine < 0
+    bullDiv := true
+if histFlipBull
+    bullDiv := false
+
+// Check for bearish divergence
+s2_priceHigh1 = ta.highest(high, i_divLookback)
+s2_macdHigh1  = ta.highest(macdLine, i_divLookback)
+if high >= s2_priceHigh1[1] and macdLine < s2_macdHigh1[1] and macdLine > 0
+    bearDiv := true
+if histFlipBear
+    bearDiv := false
+
+s2_buy  = bullDiv and (histFlipBull or histShrinkBull)
+s2_sell = bearDiv and (histFlipBear or histShrinkBear)
+
+// Reset divergence flags after signal
+if s2_buy
+    bullDiv := false
+if s2_sell
+    bearDiv := false
+
+// ── SYSTEM 3: MTF CONFIRMATION ───────────────────────────────
+// Higher timeframe MACD values
+[htfMacd_trend, htfSig_trend, _] = request.security(syminfo.tickerid, i_htfTrend, ta.macd(close, i_fastLen, i_slowLen, i_sigLen))
+[htfMacd_setup, htfSig_setup, htfHist_setup] = request.security(syminfo.tickerid, i_htfSetup, ta.macd(close, i_fastLen, i_slowLen, i_sigLen))
+
+dailyBullish = htfMacd_trend > htfSig_trend
+dailyBearish = htfMacd_trend < htfSig_trend
+h4BullCross  = htfMacd_setup > htfSig_setup and htfMacd_setup[1] <= htfSig_setup[1]
+h4BearCross  = htfMacd_setup < htfSig_setup and htfMacd_setup[1] >= htfSig_setup[1]
+
+s3_buy  = dailyBullish and h4BullCross and histFlipBull
+s3_sell = dailyBearish and h4BearCross and histFlipBear
+
+// ── ACTIVE SYSTEM SELECTION ──────────────────────────────────
+buySignal  = i_system == "System 1: Trend" ? s1_buy : i_system == "System 2: Reversal" ? s2_buy : s3_buy
+sellSignal = i_system == "System 1: Trend" ? s1_sell : i_system == "System 2: Reversal" ? s2_sell : s3_sell
+
+// ── PLOT ─────────────────────────────────────────────────────
+// MACD lines
+plot(macdLine,   "MACD",   color=color.blue,   linewidth=2)
+plot(signalLine, "Signal", color=color.orange,  linewidth=1)
+plot(histLine,   "Histogram", color=histLine >= 0 ? color.new(color.lime, 30) : color.new(color.red, 30), style=plot.style_histogram, linewidth=3)
+hline(0, "Zero Line", color=color.gray, linestyle=hline.style_dotted)
+
+// Distance rule lines (System 1)
+hline(i_distRule,  "Dist +", color=color.new(color.green, 70), linestyle=hline.style_dashed)
+hline(-i_distRule, "Dist -", color=color.new(color.red, 70), linestyle=hline.style_dashed)
+
+// Signal markers
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.bottom, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.top,    color.red,  size=size.small)
+
+// ── INFO TABLE ───────────────────────────────────────────────
+var table infoTable = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(infoTable, 0, 0, "MACD Money Map", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, i_system, text_color=color.yellow, text_size=size.small)
+    table.cell(infoTable, 0, 1, "MACD", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 1, str.tostring(macdLine, "#.####"), text_color=macdLine > 0 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(infoTable, 0, 2, "Signal", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 2, str.tostring(signalLine, "#.####"), text_color=color.orange, text_size=size.tiny)
+    table.cell(infoTable, 0, 3, "Histogram", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 3, str.tostring(histLine, "#.####"), text_color=histLine > 0 ? color.lime : color.red, text_size=size.tiny)
+
+// ── ALERTS ───────────────────────────────────────────────────
+alertcondition(buySignal,  "MACD Buy Signal",  "MACD Money Map BUY signal")
+alertcondition(sellSignal, "MACD Sell Signal", "MACD Money Map SELL signal")

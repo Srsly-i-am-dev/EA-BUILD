@@ -1,0 +1,71 @@
+//@version=5
+strategy("VWAP EMA S/R TFC [Strategy]", shorttitle="VWAP_SR_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         initial_capital=10000, commission_type=strategy.commission.cash_per_order,
+         commission_value=0, slippage=2, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=true)
+
+// ── INPUTS ───────────────────────────────────────────────────
+i_emaLen     = input.int(9,     "EMA Length",       group="EMA", minval=1)
+i_trendTF    = input.timeframe("60", "Trend TF",   group="Trend")
+i_slopeBars  = input.int(5,     "Slope Lookback",   group="VWAP", minval=2)
+i_minSlope   = input.float(0.0001, "Min Slope",    group="VWAP", step=0.0001)
+strat_atrLen = input.int(14,    "ATR Length",        group="Strategy", minval=1)
+strat_slMult = input.float(1.5, "SL ATR Mult",      group="Strategy", minval=0.1, step=0.1)
+strat_tpMult = input.float(2.5, "TP ATR Mult",      group="Strategy", minval=0.1, step=0.1)
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+vwapVal   = ta.vwap(hlc3)
+ema9      = ta.ema(close, i_emaLen)
+atrVal    = ta.atr(strat_atrLen)
+vwapSlope = (vwapVal - vwapVal[i_slopeBars]) / i_slopeBars
+vwapSteep = math.abs(vwapSlope) > i_minSlope
+
+htfVwap = request.security(syminfo.tickerid, i_trendTF, ta.vwap(hlc3))
+htfBull = close > htfVwap
+htfBear = close < htfVwap
+
+// TFC model
+var bool vwapBrokeUp = false, var bool vwapBrokeDown = false
+var bool retestBuy = false, var bool retestSell = false
+
+if ta.crossover(close, vwapVal)
+    vwapBrokeUp := true, vwapBrokeDown := false, retestBuy := false
+if ta.crossunder(close, vwapVal)
+    vwapBrokeDown := true, vwapBrokeUp := false, retestSell := false
+if vwapBrokeUp and low <= vwapVal * 1.001 and close > vwapVal
+    retestBuy := true
+if vwapBrokeDown and high >= vwapVal * 0.999 and close < vwapVal
+    retestSell := true
+
+recentHigh = ta.highest(high, 3)[1]
+recentLow  = ta.lowest(low, 3)[1]
+
+buySignal  = retestBuy and htfBull and vwapSlope > i_minSlope and close > recentHigh and vwapSteep
+sellSignal = retestSell and htfBear and vwapSlope < -i_minSlope and close < recentLow and vwapSteep
+
+if buySignal
+    retestBuy := false, vwapBrokeUp := false
+if sellSignal
+    retestSell := false, vwapBrokeDown := false
+
+// ── STRATEGY ENTRIES ─────────────────────────────────────────
+if buySignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=close - atrVal * strat_slMult, limit=close + atrVal * strat_tpMult)
+
+if sellSignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=close + atrVal * strat_slMult, limit=close - atrVal * strat_tpMult)
+
+// Exit on EMA cross (trailing)
+if strategy.position_size > 0 and ta.crossunder(close, ema9)
+    strategy.close("Long", comment="EMA Exit")
+if strategy.position_size < 0 and ta.crossover(close, ema9)
+    strategy.close("Short", comment="EMA Exit")
+
+// ── VISUALS ──────────────────────────────────────────────────
+plot(vwapVal, "VWAP", color.blue, 2)
+plot(ema9, "EMA9", color.orange, 1)
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)

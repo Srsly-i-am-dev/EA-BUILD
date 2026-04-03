@@ -1,0 +1,139 @@
+//@version=5
+indicator("VWAP EMA S/R TFC", shorttitle="VWAP_SR", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ── INPUTS ───────────────────────────────────────────────────
+// VWAP
+i_vwapSrc    = input.source(hlc3, "VWAP Source", group="VWAP")
+
+// EMA
+i_emaLen     = input.int(9, "EMA Length (Exit)", group="EMA", minval=1)
+
+// Trend (higher TF)
+i_trendTF    = input.timeframe("60", "Trend Timeframe", group="Trend")
+
+// VWAP Slope
+i_slopeBars  = input.int(5,   "Slope Lookback Bars", group="VWAP Slope", minval=2)
+i_minSlope   = input.float(0.0001, "Min Slope (avoid flat)", group="VWAP Slope", minval=0.0, step=0.0001)
+
+// S/R
+i_srLookback = input.int(20, "S/R Pivot Lookback", group="S/R", minval=3)
+
+// TP/SL
+i_slMode     = input.string("Below VWAP", "SL Placement", options=["Below VWAP", "Below Prev Candle", "ATR-based"], group="TP/SL")
+i_atrLen     = input.int(14, "ATR Length (if ATR SL)", group="TP/SL", minval=1)
+i_atrMult    = input.float(1.5, "ATR SL Multiplier", group="TP/SL", minval=0.1, step=0.1)
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+// Daily VWAP (resets each session)
+vwapVal = ta.vwap(i_vwapSrc)
+
+// EMA 9 for exit
+ema9 = ta.ema(close, i_emaLen)
+
+// ATR
+atrVal = ta.atr(i_atrLen)
+
+// VWAP slope (avoid flat VWAP)
+vwapSlope    = (vwapVal - vwapVal[i_slopeBars]) / i_slopeBars
+vwapSteep    = math.abs(vwapSlope) > i_minSlope
+vwapBullSlope = vwapSlope > i_minSlope
+vwapBearSlope = vwapSlope < -i_minSlope
+
+// Higher TF trend using VWAP
+htfVwap = request.security(syminfo.tickerid, i_trendTF, ta.vwap(hlc3))
+htfBull = close > htfVwap
+htfBear = close < htfVwap
+
+// S/R from pivots
+srHigh = ta.pivothigh(high, i_srLookback, i_srLookback)
+srLow  = ta.pivotlow(low, i_srLookback, i_srLookback)
+
+// ── TFC ENTRY MODEL ──────────────────────────────────────────
+// Trend: HTF bullish/bearish
+// Fail: Price breaks through VWAP
+// Continue: Price retests VWAP and breaks highs/lows
+
+// Buy: HTF bullish + VWAP steep up + price above VWAP + price crossed above VWAP recently + break of highs
+priceAboveVwap = close > vwapVal
+priceBelowVwap = close < vwapVal
+
+// Detect VWAP break + retest + continuation
+var bool vwapBrokeUp   = false
+var bool vwapBrokeDown = false
+var bool retestBuy     = false
+var bool retestSell    = false
+
+// Break above VWAP
+if ta.crossover(close, vwapVal)
+    vwapBrokeUp   := true
+    vwapBrokeDown := false
+    retestBuy     := false
+
+// Break below VWAP
+if ta.crossunder(close, vwapVal)
+    vwapBrokeDown := true
+    vwapBrokeUp   := false
+    retestSell    := false
+
+// Retest: price touches VWAP after breaking it
+if vwapBrokeUp and low <= vwapVal * 1.001 and close > vwapVal
+    retestBuy := true
+
+if vwapBrokeDown and high >= vwapVal * 0.999 and close < vwapVal
+    retestSell := true
+
+// Continuation: break of recent highs/lows after retest
+recentHigh = ta.highest(high, 3)[1]
+recentLow  = ta.lowest(low, 3)[1]
+
+buySignal  = retestBuy and htfBull and vwapBullSlope and close > recentHigh and vwapSteep
+sellSignal = retestSell and htfBear and vwapBearSlope and close < recentLow and vwapSteep
+
+// Reset after signal
+if buySignal
+    retestBuy := false
+    vwapBrokeUp := false
+
+if sellSignal
+    retestSell := false
+    vwapBrokeDown := false
+
+// ── TP/SL ────────────────────────────────────────────────────
+float buySL = na
+float sellSL = na
+
+if i_slMode == "Below VWAP"
+    buySL  := vwapVal
+    sellSL := vwapVal
+else if i_slMode == "Below Prev Candle"
+    buySL  := low[1]
+    sellSL := high[1]
+else
+    buySL  := close - atrVal * i_atrMult
+    sellSL := close + atrVal * i_atrMult
+
+// ── VISUALS ──────────────────────────────────────────────────
+plot(vwapVal, "VWAP", color=color.blue, linewidth=2)
+plot(ema9,    "EMA 9", color=color.orange, linewidth=1)
+
+// VWAP slope indicator
+bgcolor(vwapSteep ? na : color.new(color.gray, 90), title="Flat VWAP Warning")
+
+plotshape(buySignal,  "Buy TFC",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell TFC", shape.triangledown,  location.abovebar, color.red,  size=size.small)
+
+// S/R markers
+plotshape(not na(srHigh), "Resistance", shape.xcross, location.abovebar, color.new(color.red, 60),  size=size.tiny)
+plotshape(not na(srLow),  "Support",    shape.xcross, location.belowbar, color.new(color.green, 60), size=size.tiny)
+
+// ── INFO TABLE ───────────────────────────────────────────────
+var table tbl = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(tbl, 0, 0, "VWAP TFC", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, "", text_size=size.small)
+    table.cell(tbl, 0, 1, "HTF Trend", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 1, htfBull ? "BULL" : "BEAR", text_color=htfBull ? color.lime : color.red, text_size=size.tiny)
+    table.cell(tbl, 0, 2, "VWAP Slope", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 2, vwapSteep ? (vwapBullSlope ? "UP" : "DOWN") : "FLAT", text_color=vwapSteep ? color.lime : color.gray, text_size=size.tiny)
+    table.cell(tbl, 0, 3, "State", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 3, retestBuy ? "RETEST BUY" : retestSell ? "RETEST SELL" : "WAITING", text_color=color.yellow, text_size=size.tiny)

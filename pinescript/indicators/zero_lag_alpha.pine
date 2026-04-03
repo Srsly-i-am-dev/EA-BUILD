@@ -1,0 +1,76 @@
+//@version=5
+indicator("Zero Lag Trend Signals MTF", shorttitle="ZeroLag", overlay=true)
+
+// ── INPUTS ───────────────────────────────────────────────────
+length = input.int(70, "Length", group="Main Calculations")
+mult   = input.float(1.2, "Band Multiplier", group="Main Calculations")
+t1 = input.timeframe("5",   "Time frame 1", group="Extra Timeframes")
+t2 = input.timeframe("15",  "Time frame 2", group="Extra Timeframes")
+t3 = input.timeframe("60",  "Time frame 3", group="Extra Timeframes")
+t4 = input.timeframe("240", "Time frame 4", group="Extra Timeframes")
+t5 = input.timeframe("1D",  "Time frame 5", group="Extra Timeframes")
+green_c = input.color(#00ffbb, "Bullish Color", group="Appearance")
+red_c   = input.color(#ff1100, "Bearish Color", group="Appearance")
+
+src = close
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+lag = math.floor((length - 1) / 2)
+zlema = ta.ema(src + (src - src[lag]), length)
+volatility = ta.highest(ta.atr(length), length * 3) * mult
+
+var trend = 0
+if ta.crossover(close, zlema + volatility)
+    trend := 1
+if ta.crossunder(close, zlema - volatility)
+    trend := -1
+
+// ── SIGNALS ──────────────────────────────────────────────────
+buySignal  = ta.crossover(close, zlema) and trend == 1 and trend[1] == 1
+sellSignal = ta.crossunder(close, zlema) and trend == -1 and trend[1] == -1
+trendBullish = ta.crossover(trend, 0)
+trendBearish = ta.crossunder(trend, 0)
+
+// ── MTF ──────────────────────────────────────────────────────
+s1 = request.security(syminfo.tickerid, t1, trend)
+s2 = request.security(syminfo.tickerid, t2, trend)
+s3 = request.security(syminfo.tickerid, t3, trend)
+s4 = request.security(syminfo.tickerid, t4, trend)
+s5 = request.security(syminfo.tickerid, t5, trend)
+
+// ── VISUALS ──────────────────────────────────────────────────
+zlemaColor = trend == 1 ? color.new(green_c, 70) : color.new(red_c, 70)
+m = plot(zlema, title="Zero Lag Basis", linewidth=2, color=zlemaColor)
+upper = plot(trend == -1 ? zlema + volatility : na, style=plot.style_linebr, color=color.new(red_c, 90), title="Upper Band")
+lower = plot(trend == 1 ? zlema - volatility : na, style=plot.style_linebr, color=color.new(green_c, 90), title="Lower Band")
+
+fill(m, upper, (open + close) / 2, zlema + volatility, color.new(red_c, 90), color.new(red_c, 70))
+fill(m, lower, (open + close) / 2, zlema - volatility, color.new(green_c, 90), color.new(green_c, 70))
+
+plotshape(trendBearish ? zlema + volatility : na, "Bearish Trend", shape.labeldown, location.absolute, red_c, text="v", textcolor=color.white, size=size.small)
+plotshape(trendBullish ? zlema - volatility : na, "Bullish Trend", shape.labelup, location.absolute, green_c, text="^", textcolor=color.white, size=size.small)
+
+plotchar(buySignal ? zlema - volatility * 1.5 : na, "Bullish Entry", "^", location.absolute, green_c, size=size.tiny)
+plotchar(sellSignal ? zlema + volatility * 1.5 : na, "Bearish Entry", "v", location.absolute, red_c, size=size.tiny)
+
+// ── MTF TABLE ────────────────────────────────────────────────
+if barstate.islast
+    var data_table = table.new(position=position.top_right, columns=2, rows=6, bgcolor=color.new(color.black, 80), border_width=1)
+    table.cell(data_table, 0, 0, "TF",     text_color=color.white)
+    table.cell(data_table, 1, 0, "Signal", text_color=color.white)
+    table.cell(data_table, 0, 1, t1, text_color=color.white)
+    table.cell(data_table, 1, 1, s1 == 1 ? "Bullish" : "Bearish", text_color=color.white, bgcolor=s1 == 1 ? color.new(green_c, 70) : color.new(red_c, 70))
+    table.cell(data_table, 0, 2, t2, text_color=color.white)
+    table.cell(data_table, 1, 2, s2 == 1 ? "Bullish" : "Bearish", text_color=color.white, bgcolor=s2 == 1 ? color.new(green_c, 70) : color.new(red_c, 70))
+    table.cell(data_table, 0, 3, t3, text_color=color.white)
+    table.cell(data_table, 1, 3, s3 == 1 ? "Bullish" : "Bearish", text_color=color.white, bgcolor=s3 == 1 ? color.new(green_c, 70) : color.new(red_c, 70))
+    table.cell(data_table, 0, 4, t4, text_color=color.white)
+    table.cell(data_table, 1, 4, s4 == 1 ? "Bullish" : "Bearish", text_color=color.white, bgcolor=s4 == 1 ? color.new(green_c, 70) : color.new(red_c, 70))
+    table.cell(data_table, 0, 5, t5, text_color=color.white)
+    table.cell(data_table, 1, 5, s5 == 1 ? "Bullish" : "Bearish", text_color=color.white, bgcolor=s5 == 1 ? color.new(green_c, 70) : color.new(red_c, 70))
+
+// ── ALERTS ───────────────────────────────────────────────────
+alertcondition(buySignal, "Bullish Entry Signal")
+alertcondition(sellSignal, "Bearish Entry Signal")
+alertcondition(trendBullish, "Bullish Trend")
+alertcondition(trendBearish, "Bearish Trend")

@@ -1,0 +1,62 @@
+//@version=5
+strategy("Volumatic VIDYA [Strategy]", shorttitle="VolVIDYA_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         initial_capital=10000, commission_type=strategy.commission.cash_per_order,
+         commission_value=0, slippage=2, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=true)
+
+// ── INPUTS ───────────────────────────────────────────────────
+int   vidya_length   = input.int(10,    "VIDYA Length",         group="VIDYA")
+int   vidya_momentum = input.int(20,    "VIDYA Momentum",       group="VIDYA")
+float band_distance  = input.float(2.0, "Band Distance (ATR)", group="VIDYA", step=0.1)
+
+// Strategy TP/SL
+strat_atrLen = input.int(14,    "ATR Length",         group="Strategy", minval=1)
+strat_slMult = input.float(1.5, "SL ATR Multiplier",  group="Strategy", minval=0.1, step=0.1)
+strat_tpMult = input.float(2.5, "TP ATR Multiplier",  group="Strategy", minval=0.1, step=0.1)
+
+// ── VIDYA FUNCTION ───────────────────────────────────────────
+vidya_calc(float src, int vLen, int vMom) =>
+    float momentum_val = ta.change(src)
+    float sum_pos = math.sum(momentum_val >= 0 ? momentum_val : 0.0, vMom)
+    float sum_neg = math.sum(momentum_val >= 0 ? 0.0 : -momentum_val, vMom)
+    float abs_cmo = math.abs(100 * (sum_pos - sum_neg) / (sum_pos + sum_neg))
+    float alpha = 2 / (vLen + 1)
+    var float vidya_val = 0.0
+    vidya_val := alpha * abs_cmo / 100 * src + (1 - alpha * abs_cmo / 100) * nz(vidya_val[1])
+    ta.sma(vidya_val, 15)
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+float atr_value   = ta.atr(200)
+float vidya_value = vidya_calc(close, vidya_length, vidya_momentum)
+float upper_band  = vidya_value + atr_value * band_distance
+float lower_band  = vidya_value - atr_value * band_distance
+
+var bool is_trend_up = false
+if ta.crossover(close, upper_band)
+    is_trend_up := true
+if ta.crossunder(close, lower_band)
+    is_trend_up := false
+
+bool trend_cross_up   = not is_trend_up[1] and is_trend_up
+bool trend_cross_down = not is_trend_up and is_trend_up[1]
+
+bool buySignal  = trend_cross_up[1]
+bool sellSignal = trend_cross_down[1]
+
+// ── TP/SL ────────────────────────────────────────────────────
+strat_atr = ta.atr(strat_atrLen)
+
+// ── STRATEGY ENTRIES ─────────────────────────────────────────
+if buySignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=close - strat_atr * strat_slMult, limit=close + strat_atr * strat_tpMult)
+
+if sellSignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=close + strat_atr * strat_slMult, limit=close - strat_atr * strat_tpMult)
+
+// ── VISUALS ──────────────────────────────────────────────────
+color trend_color = is_trend_up ? color.green : color.red
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)

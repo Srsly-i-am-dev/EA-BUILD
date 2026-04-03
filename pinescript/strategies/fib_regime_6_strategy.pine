@@ -1,0 +1,79 @@
+//@version=5
+strategy("Fib Regime 6 [Strategy]", shorttitle="FibReg6_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         initial_capital=10000, commission_type=strategy.commission.cash_per_order,
+         commission_value=0, slippage=2, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=true)
+
+// ── INPUTS ───────────────────────────────────────────────────
+i_emaFast       = input.int(50,    "EMA Fast",     group="Signal", minval=5)
+i_emaSlow       = input.int(200,   "EMA Slow",     group="Signal", minval=20)
+i_atrPeriod     = input.int(14,    "ATR Fast",     group="Signal", minval=1)
+i_swingLookback = input.int(14,    "Swing Lookback", group="Signal", minval=3)
+i_minImpulseATR = input.float(0.9, "Min Impulse",  group="Signal", minval=0.1, step=0.1)
+i_impulseBody   = input.float(0.55,"Body Ratio",   group="Signal", minval=0.1, step=0.1)
+i_regimeEnabled = input.bool(true, "Regime Blocker", group="Regime")
+i_atrSlowPeriod = input.int(50,    "ATR Slow",     group="Regime", minval=10)
+i_minVolRatio   = input.float(0.80,"Min Vol Ratio", group="Regime", step=0.05)
+i_slopeLookback = input.int(10,    "Slope Lookback", group="Regime", minval=2)
+i_minSlopeNorm  = input.float(0.30,"Min Slope",    group="Regime", step=0.05)
+i_volAdaptive   = input.bool(true, "Vol-Adaptive",  group="Vol Scaler")
+i_volClampMin   = input.float(0.80,"Clamp Min",    group="Vol Scaler", step=0.05)
+i_volClampMax   = input.float(1.40,"Clamp Max",    group="Vol Scaler", step=0.05)
+i_slMult        = input.float(0.85,"SL Mult",      group="TP/SL", step=0.05)
+i_tpMult        = input.float(1.90,"TP Mult",      group="TP/SL", step=0.05)
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+emaFast  = ta.ema(close, i_emaFast)
+emaSlow  = ta.ema(close, i_emaSlow)
+atrFast  = ta.atr(i_atrPeriod)
+atrSlow  = ta.atr(i_atrSlowPeriod)
+
+swingHigh = ta.highest(high, i_swingLookback)
+swingLow  = ta.lowest(low, i_swingLookback)
+impulse   = swingHigh - swingLow
+
+bodyRatio = (high - low) > 0 ? math.abs(close - open) / (high - low) : 0
+volRatio  = atrSlow > 0 ? atrFast / atrSlow : 0
+emaSlope  = (emaFast - emaFast[i_slopeLookback]) / i_slopeLookback
+slopeNorm = atrFast > 0 ? math.abs(emaSlope) / atrFast : 0
+regimeOK  = not i_regimeEnabled or (volRatio >= i_minVolRatio and slopeNorm >= i_minSlopeNorm)
+
+volFactor = 1.0
+if i_volAdaptive and atrSlow > 0
+    volFactor := math.max(i_volClampMin, math.min(i_volClampMax, atrFast / atrSlow))
+
+buyFibHi  = swingHigh - impulse * 0.50
+buyFibLo  = swingHigh - impulse * 0.618
+sellFibLo = swingLow + impulse * 0.50
+sellFibHi = swingLow + impulse * 0.618
+
+inSession = hour(time, "UTC") >= 7 and hour(time, "UTC") <= 21
+
+buySignal  = emaFast > emaSlow and impulse >= atrFast * i_minImpulseATR and close > open and bodyRatio >= i_impulseBody and close >= buyFibLo and close <= buyFibHi and inSession and regimeOK
+sellSignal = emaFast < emaSlow and impulse >= atrFast * i_minImpulseATR and close < open and bodyRatio >= i_impulseBody and close >= sellFibLo and close <= sellFibHi and inSession and regimeOK
+
+origBuySL  = close - (swingLow - atrFast * 0.8)
+origBuyTP  = (swingHigh + atrFast * 1.5) - close
+origSellSL = (swingHigh + atrFast * 0.8) - close
+origSellTP = close - (swingLow - atrFast * 1.5)
+
+// ── STRATEGY ENTRIES ─────────────────────────────────────────
+if buySignal
+    sl = close - origBuySL * i_slMult * volFactor
+    tp = close + origBuyTP * i_tpMult * volFactor
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+
+if sellSignal
+    sl = close + origSellSL * i_slMult * volFactor
+    tp = close - origSellTP * i_tpMult * volFactor
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+
+// ── VISUALS ──────────────────────────────────────────────────
+plot(emaFast, "EMA Fast", color.blue, 1)
+plot(emaSlow, "EMA Slow", color.orange, 1)
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)
+bgcolor(i_regimeEnabled and not regimeOK ? color.new(color.gray, 90) : na)

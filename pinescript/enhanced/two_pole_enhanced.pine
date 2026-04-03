@@ -1,0 +1,128 @@
+//@version=5
+indicator("Two-Pole Oscillator", shorttitle="TwoPole", max_labels_count=500, max_lines_count=500)
+
+// ── INPUTS ───────────────────────────────────────────────────
+int   length   = input.int(15, minval=1, title="Filter Length")
+bool  disp_lvl = input.bool(true, "Show Levels")
+color up_color = input.color(#55ffda, "Up Color", inline="color")
+color dn_color = input.color(#8c5bff, "Down Color", inline="color")
+
+// ── WEBHOOK TP/SL INPUTS ─────────────────────────────────────
+wh_enable      = input.bool(true,  "Enable Webhook Alerts",    group="Webhook / MT5")
+wh_atrLen      = input.int(14,     "ATR Length",               group="Webhook / MT5", minval=1)
+wh_tpMult      = input.float(2.0,  "TP ATR Multiplier",        group="Webhook / MT5", minval=0.1, step=0.1)
+wh_slMult      = input.float(1.0,  "SL ATR Multiplier",        group="Webhook / MT5", minval=0.1, step=0.1)
+wh_showLines   = input.bool(true,  "Show TP/SL Lines on Chart",group="Webhook / MT5")
+
+var line buy_line  = line(na)
+var line sell_line = line(na)
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+float sma1   = ta.sma(close, 25)
+float sma_n1 = ((close - sma1) - ta.sma(close - sma1, 25)) / ta.stdev(close - sma1, 25)
+float area   = ta.sma(high - low, 100)
+
+// Two-pole smooth filter function
+f_two_pole_filter(float source, int len) =>
+    var float smooth1 = na
+    var float smooth2 = na
+    alpha = 2.0 / (len + 1)
+    if na(smooth1)
+        smooth1 := source
+    else
+        smooth1 := (1 - alpha) * smooth1 + alpha * source
+    if na(smooth2)
+        smooth2 := smooth1
+    else
+        smooth2 := (1 - alpha) * smooth2 + alpha * smooth1
+    smooth2
+
+// Oscillator
+two_p  = f_two_pole_filter(sma_n1, length)
+two_pp = two_p[4]
+
+// Colors
+color buy_col1  = color.from_gradient(two_p, -1, 0.5, up_color, na)
+color buy_col2  = color.from_gradient(two_p, -1, 0.5, color.new(up_color, 50), na)
+color sell_col1 = color.from_gradient(two_p, -0.5, 1, na, dn_color)
+color sell_col2 = color.from_gradient(two_p, -0.5, 1, na, color.new(dn_color, 50))
+color clr       = two_p > two_pp
+                  ? color.from_gradient(two_p, -1, 1, up_color, color.new(up_color, 0))
+                  : color.from_gradient(two_p, -1, 1, color.new(dn_color, 0), dn_color)
+
+// ── SIGNALS ──────────────────────────────────────────────────
+bool buySignal  = ta.crossover(two_p, two_pp) and two_p < 0 and barstate.isconfirmed
+bool sellSignal = ta.crossunder(two_p, two_pp) and two_p > 0 and barstate.isconfirmed
+
+// ── LEVEL LINES ──────────────────────────────────────────────
+if buySignal
+    sell_line := line(na)
+    if disp_lvl
+        buy_line := line.new(bar_index, low[0] - area, bar_index, low[0] - area, color=buy_col1, style=line.style_dashed)
+    label.new(bar_index, low[0] - area, color=buy_col1, style=label.style_label_up, size=size.tiny)
+    label.new(bar_index, low[0] - area * 1.5, color=color.new(color.black, 100), text=str.tostring(low[0] - area, "#.##"), style=label.style_label_up, size=size.small, textcolor=color.gray)
+
+if not na(buy_line) and ta.crossunder(low, line.get_y1(buy_line)) and barstate.isconfirmed
+    label.new(bar_index, line.get_y1(buy_line), color=color.new(up_color, 100), style=label.style_label_center, size=size.large, text="X", textcolor=up_color)
+    buy_line := line(na)
+
+if sellSignal
+    buy_line := line(na)
+    if disp_lvl
+        sell_line := line.new(bar_index, high[0] + area, bar_index, high[0] + area, color=sell_col1, style=line.style_dashed)
+    label.new(bar_index, high[0] + area, color=sell_col1, style=label.style_label_down, size=size.tiny)
+    label.new(bar_index, high + area * 1.5, color=color.new(color.black, 100), text=str.tostring(high + area, "#.##"), style=label.style_label_down, size=size.small, textcolor=color.gray)
+
+if not na(sell_line) and ta.crossover(high, line.get_y1(sell_line)) and barstate.isconfirmed
+    label.new(bar_index, line.get_y1(sell_line), color=color.new(dn_color, 100), style=label.style_label_center, size=size.large, text="X", textcolor=dn_color)
+    sell_line := line(na)
+
+if not na(buy_line)
+    line.set_x2(buy_line, bar_index)
+if not na(sell_line)
+    line.set_x2(sell_line, bar_index)
+
+// ── PLOT ─────────────────────────────────────────────────────
+plotshape(buySignal  ? two_p[0] : na, "Buy",  shape.circle, location.absolute, buy_col2,  0, size=size.small)
+plotshape(buySignal  ? two_p[0] : na, "Buy2", shape.circle, location.absolute, buy_col1,  0, size=size.tiny)
+plotshape(sellSignal ? two_p[0] : na, "Sell", shape.circle, location.absolute, sell_col2, 0, size=size.small)
+plotshape(sellSignal ? two_p[0] : na, "Sell2",shape.circle, location.absolute, sell_col1, 0, size=size.tiny)
+
+p11 = plot(1,    color=color.new(color.gray, 80))
+plot(0.5,        color=color.new(color.gray, 50))
+p00 = plot(0,    color=color.new(bar_index % 2 == 0 ? color.gray : na, 0))
+plot(-0.5,       color=color.new(color.gray, 50))
+p_1 = plot(-1,   color=color.new(color.gray, 80))
+
+fill(p11, p00, 2, -1, color.new(color.gray, 80), na)
+fill(p_1, p00, 1, -2, na, color.new(color.gray, 80))
+
+p1 = plot(two_p,  color=clr, linewidth=1)
+p2 = plot(two_pp, display=display.none)
+fill(p1, p2, two_p, two_pp, clr, na)
+
+// ── WEBHOOK ALERTS (ATR-based TP/SL) ─────────────────────────
+// Non-overlay indicator: calculate ATR-based TP/SL for webhook but skip chart lines
+wh_atr    = ta.atr(wh_atrLen)
+wh_buyTP  = close + wh_atr * wh_tpMult
+wh_buySL  = close - wh_atr * wh_slMult
+wh_sellTP = close - wh_atr * wh_tpMult
+wh_sellSL = close + wh_atr * wh_slMult
+
+wh_buyRR  = wh_buySL != close ? math.abs((wh_buyTP - close) / (close - wh_buySL)) : 0.0
+wh_sellRR = wh_sellSL != close ? math.abs((close - wh_sellTP) / (wh_sellSL - close)) : 0.0
+
+// alertcondition
+alertcondition(buySignal,  title="TwoPole BUY",  message='{"indicator_id":"TwoPole","strategy_id":"two_pole_oscillator","symbol":"{{ticker}}","action":"BUY","risk":1.0,"meta":{"tp":{{close}},"sl":{{close}},"rr":"0:1"}}')
+alertcondition(sellSignal, title="TwoPole SELL", message='{"indicator_id":"TwoPole","strategy_id":"two_pole_oscillator","symbol":"{{ticker}}","action":"SELL","risk":1.0,"meta":{"tp":{{close}},"sl":{{close}},"rr":"0:1"}}')
+
+// alert() with full JSON payload
+if wh_enable and buySignal
+    wh_buyMsg = '{"indicator_id":"TwoPole","strategy_id":"two_pole_oscillator","symbol":"' + syminfo.ticker + '","action":"BUY","risk":1.0,"meta":{"tp":' + str.tostring(wh_buyTP, "#.#####") + ',"sl":' + str.tostring(wh_buySL, "#.#####") + ',"rr":"' + str.tostring(wh_buyRR, "#.##") + ':1"}}'
+    alert(wh_buyMsg, alert.freq_once_per_bar_close)
+
+if wh_enable and sellSignal
+    wh_sellMsg = '{"indicator_id":"TwoPole","strategy_id":"two_pole_oscillator","symbol":"' + syminfo.ticker + '","action":"SELL","risk":1.0,"meta":{"tp":' + str.tostring(wh_sellTP, "#.#####") + ',"sl":' + str.tostring(wh_sellSL, "#.#####") + ',"rr":"' + str.tostring(wh_sellRR, "#.##") + ':1"}}'
+    alert(wh_sellMsg, alert.freq_once_per_bar_close)
+
+// NOTE: No chart TP/SL lines for this indicator (overlay=false, non-overlay oscillator)
