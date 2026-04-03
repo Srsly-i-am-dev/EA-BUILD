@@ -1,0 +1,131 @@
+//@version=5
+strategy("Zigzag Sniper [Strategy]", shorttitle="ZZSniper_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         initial_capital=10000, commission_type=strategy.commission.cash_per_order,
+         commission_value=0, slippage=2, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=true)
+
+// ── INPUTS ───────────────────────────────────────────────────
+i_zzLen       = input.int(5,      "Zigzag Length",         group="Zigzag", minval=2)
+i_maxPivots   = input.int(20,     "Max Pivots",            group="Zigzag", minval=5)
+i_hhhlFilter  = input.bool(true,  "HH/HL Filter (Bull)",  group="Pattern")
+i_lhllFilter  = input.bool(true,  "LH/LL Filter (Bear)",  group="Pattern")
+i_minSwingATR = input.float(1.0,  "Min Swing Size (ATR)", group="Pattern", step=0.1)
+i_atrLen      = input.int(14,     "ATR Length",            group="Entry", minval=1)
+i_slMode      = input.string("Swing Level", "SL Mode",    group="TP/SL", options=["Swing Level", "ATR Based"])
+i_slATRMult   = input.float(1.5,  "SL ATR Mult",          group="TP/SL", step=0.1)
+i_tpMode      = input.string("Fib Extension", "TP Mode",  group="TP/SL", options=["Fib Extension", "ATR Based", "R:R Based"])
+i_tpFibExt    = input.float(1.618,"TP Fib Extension",     group="TP/SL", step=0.01)
+i_tpATRMult   = input.float(2.5,  "TP ATR Mult",          group="TP/SL", step=0.1)
+i_tpRR        = input.float(2.0,  "TP R:R Ratio",         group="TP/SL", step=0.1)
+i_useSession  = input.bool(true,  "Session Filter",       group="Session")
+
+// ── ZIGZAG ───────────────────────────────────────────────────
+var float[] zzP = array.new_float(0)
+var int[]   zzB = array.new_int(0)
+var int[]   zzD = array.new_int(0)
+var int     zzDir = 0
+
+isH = high == ta.highest(high, i_zzLen)
+isL = low == ta.lowest(low, i_zzLen)
+atrVal = ta.atr(i_atrLen)
+
+newPiv = false
+pP = 0.0
+pB = 0
+pD = 0
+
+if isH and not isL
+    if zzDir != 1
+        if array.size(zzP) > 0 or zzDir == 0
+            pP := high
+            pB := bar_index
+            pD := 1
+            newPiv := true
+        zzDir := 1
+    else if array.size(zzP) > 0 and high > array.get(zzP, 0) and array.get(zzD, 0) == 1
+        array.set(zzP, 0, high)
+        array.set(zzB, 0, bar_index)
+
+if isL and not isH
+    if zzDir != -1
+        if array.size(zzP) > 0 or zzDir == 0
+            pP := low
+            pB := bar_index
+            pD := -1
+            newPiv := true
+        zzDir := -1
+    else if array.size(zzP) > 0 and low < array.get(zzP, 0) and array.get(zzD, 0) == -1
+        array.set(zzP, 0, low)
+        array.set(zzB, 0, bar_index)
+
+if newPiv
+    array.unshift(zzP, pP)
+    array.unshift(zzB, pB)
+    array.unshift(zzD, pD)
+    while array.size(zzP) > i_maxPivots
+        array.pop(zzP)
+        array.pop(zzB)
+        array.pop(zzD)
+
+// ── PATTERN + ENTRIES ────────────────────────────────────────
+inSession = i_useSession ? (hour(time, "UTC") >= 7 and hour(time, "UTC") <= 21) : true
+
+if newPiv and array.size(zzP) >= 4 and inSession
+    p0 = array.get(zzP, 0)
+    p1 = array.get(zzP, 1)
+    p2 = array.get(zzP, 2)
+    p3 = array.get(zzP, 3)
+    d0 = array.get(zzD, 0)
+    swingSize = math.abs(p0 - p1)
+    validSize = swingSize >= atrVal * i_minSwingATR
+
+    // Bull: HH+HL, latest is low
+    bullPattern = d0 == -1 and p1 > p3 and p0 > p2
+    bearPattern = d0 == 1 and p1 < p3 and p0 < p2
+
+    bullOK = (not i_hhhlFilter or bullPattern) and d0 == -1 and validSize
+    bearOK = (not i_lhllFilter or bearPattern) and d0 == 1 and validSize
+
+    if bullOK
+        float sl = na
+        if i_slMode == "Swing Level"
+            sl := p0 - atrVal * 0.2
+        else
+            sl := close - atrVal * i_slATRMult
+        slDist = math.abs(close - sl)
+
+        float tp = na
+        if i_tpMode == "Fib Extension"
+            abR = math.abs(p1 - p2)
+            tp := p0 + abR * i_tpFibExt
+        else if i_tpMode == "ATR Based"
+            tp := close + atrVal * i_tpATRMult
+        else
+            tp := close + slDist * i_tpRR
+
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+
+    if bearOK
+        float sl = na
+        if i_slMode == "Swing Level"
+            sl := p0 + atrVal * 0.2
+        else
+            sl := close + atrVal * i_slATRMult
+        slDist = math.abs(sl - close)
+
+        float tp = na
+        if i_tpMode == "Fib Extension"
+            abR = math.abs(p1 - p2)
+            tp := p0 - abR * i_tpFibExt
+        else if i_tpMode == "ATR Based"
+            tp := close - atrVal * i_tpATRMult
+        else
+            tp := close - slDist * i_tpRR
+
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+
+// ── VISUALS ──────────────────────────────────────────────────
+plot(close, display=display.none)

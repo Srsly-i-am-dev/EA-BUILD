@@ -1,0 +1,149 @@
+//@version=5
+indicator("Volumatic VIDYA", shorttitle="VolVIDYA", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ── INPUTS ───────────────────────────────────────────────────
+int   vidya_length   = input.int(10,    "VIDYA Length",         group="VIDYA")
+int   vidya_momentum = input.int(20,    "VIDYA Momentum",       group="VIDYA")
+float band_distance  = input.float(2.0, "Band Distance (ATR)", group="VIDYA", step=0.1)
+int   pivot_bars     = input.int(3,     "Pivot Lookback Bars",  group="Liquidity")
+float source         = input.source(close, "Source")
+
+color up_trend_color   = input.color(#17dfad, "Bullish", group="Color", inline="c")
+color down_trend_color = input.color(#dd326b, "Bearish", group="Color", inline="c")
+bool  show_shadow      = input.bool(true, "Shadow", group="Color", inline="c")
+
+// ── WEBHOOK / MT5 INPUTS ────────────────────────────────────
+bool  wh_enable    = input.bool(true,  "Enable Webhook Alerts",  group="Webhook / MT5")
+int   wh_atrLen    = input.int(14,     "ATR Length",              group="Webhook / MT5", minval=1)
+float wh_tpMult    = input.float(2.0,  "TP ATR Multiplier",      group="Webhook / MT5", minval=0.1, step=0.1)
+float wh_slMult    = input.float(1.0,  "SL ATR Multiplier",      group="Webhook / MT5", minval=0.1, step=0.1)
+bool  wh_showLines = input.bool(true,  "Show TP/SL Lines",       group="Webhook / MT5")
+
+// ── VIDYA FUNCTION ───────────────────────────────────────────
+vidya_calc(float src, int vLen, int vMom) =>
+    float momentum_val = ta.change(src)
+    float sum_pos = math.sum(momentum_val >= 0 ? momentum_val : 0.0, vMom)
+    float sum_neg = math.sum(momentum_val >= 0 ? 0.0 : -momentum_val, vMom)
+    float abs_cmo = math.abs(100 * (sum_pos - sum_neg) / (sum_pos + sum_neg))
+    float alpha = 2 / (vLen + 1)
+    var float vidya_val = 0.0
+    vidya_val := alpha * abs_cmo / 100 * src + (1 - alpha * abs_cmo / 100) * nz(vidya_val[1])
+    ta.sma(vidya_val, 15)
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+float atr_value   = ta.atr(200)
+float vidya_value = vidya_calc(source, vidya_length, vidya_momentum)
+float upper_band  = vidya_value + atr_value * band_distance
+float lower_band  = vidya_value - atr_value * band_distance
+
+var bool is_trend_up = false
+float smoothed_value = na
+
+if ta.crossover(source, upper_band)
+    is_trend_up := true
+if ta.crossunder(source, lower_band)
+    is_trend_up := false
+
+if is_trend_up
+    smoothed_value := lower_band
+if not is_trend_up
+    smoothed_value := upper_band
+if ta.change(is_trend_up)
+    smoothed_value := na
+
+// Pivot detection
+bool pivot_high_found = not na(ta.pivothigh(pivot_bars, pivot_bars))
+bool pivot_low_found  = not na(ta.pivotlow(close, pivot_bars, pivot_bars))
+
+// ── SIGNALS ──────────────────────────────────────────────────
+bool trend_cross_up   = not is_trend_up[1] and is_trend_up
+bool trend_cross_down = not is_trend_up and is_trend_up[1]
+
+bool buySignal  = trend_cross_up[1]
+bool sellSignal = trend_cross_down[1]
+
+// Volume delta tracking
+var float up_vol   = 0.0
+var float down_vol = 0.0
+
+if ta.change(trend_cross_up) or ta.change(trend_cross_down)
+    up_vol   := 0
+    down_vol := 0
+
+if not (ta.change(trend_cross_up) or ta.change(trend_cross_down))
+    up_vol   := up_vol + (close > open ? volume : 0)
+    down_vol := down_vol + (close < open ? volume : 0)
+
+// ── PIVOT LINES ──────────────────────────────────────────────
+if not na(smoothed_value) and low[pivot_bars] > smoothed_value and pivot_low_found
+    line.new(bar_index[pivot_bars], low[pivot_bars], bar_index[pivot_bars] + 5, low[pivot_bars], color=color.new(up_trend_color, 50))
+
+if not na(smoothed_value) and high[pivot_bars] < smoothed_value and pivot_high_found
+    line.new(bar_index[pivot_bars], high[pivot_bars], bar_index[pivot_bars] + 5, high[pivot_bars], color=color.new(down_trend_color, 50))
+
+// ── VISUALS ──────────────────────────────────────────────────
+color trend_color = is_trend_up ? up_trend_color : down_trend_color
+
+p1 = plot(smoothed_value, color=trend_color, linewidth=2, style=plot.style_linebr)
+p2 = plot(hl2, display=display.none)
+fill(p1, p2, smoothed_value, hl2, color.new(trend_color, show_shadow ? 80 : 100), na)
+
+plotshape(buySignal  ? smoothed_value : na, "Trend Up",   shape.labelup,   location.absolute, color.new(up_trend_color, 50),   text="^", textcolor=color.white)
+plotshape(sellSignal ? smoothed_value : na, "Trend Down", shape.labeldown, location.absolute, color.new(down_trend_color, 50), text="v", textcolor=color.white)
+
+// ── INFO LABEL ───────────────────────────────────────────────
+if barstate.islast and not na(smoothed_value)
+    float avg_delta = (up_vol + down_vol) / 2
+    string delta_pct = avg_delta > 0 ? str.tostring((up_vol - down_vol) / avg_delta * 100, "#.#") + "%" : "0%"
+    label.new(bar_index, smoothed_value,
+              "Buy Vol: " + str.tostring(up_vol, "#") +
+              "\nSell Vol: " + str.tostring(down_vol, "#") +
+              "\nDelta: " + delta_pct,
+              color=color.new(trend_color, 90),
+              style=is_trend_up ? label.style_label_upper_left : label.style_label_lower_left,
+              textcolor=color.white, size=size.small)
+
+// ── WEBHOOK TP/SL CALCULATION ────────────────────────────────
+float wh_atr = ta.atr(wh_atrLen)
+
+float wh_buyTP  = close + wh_atr * wh_tpMult
+float wh_buySL  = close - wh_atr * wh_slMult
+float wh_sellTP = close - wh_atr * wh_tpMult
+float wh_sellSL = close + wh_atr * wh_slMult
+
+// ── WEBHOOK TP/SL LINES ─────────────────────────────────────
+var line wh_tpLine = na
+var line wh_slLine = na
+
+if wh_showLines and wh_enable
+    if buySignal
+        // Delete old lines
+        if not na(wh_tpLine)
+            line.delete(wh_tpLine)
+        if not na(wh_slLine)
+            line.delete(wh_slLine)
+        wh_tpLine := line.new(bar_index, wh_buyTP, bar_index + 20, wh_buyTP, color=color.lime, width=2, style=line.style_dashed)
+        wh_slLine := line.new(bar_index, wh_buySL, bar_index + 20, wh_buySL, color=color.red, width=2, style=line.style_dashed)
+
+    if sellSignal
+        if not na(wh_tpLine)
+            line.delete(wh_tpLine)
+        if not na(wh_slLine)
+            line.delete(wh_slLine)
+        wh_tpLine := line.new(bar_index, wh_sellTP, bar_index + 20, wh_sellTP, color=color.lime, width=2, style=line.style_dashed)
+        wh_slLine := line.new(bar_index, wh_sellSL, bar_index + 20, wh_sellSL, color=color.red, width=2, style=line.style_dashed)
+
+// ── WEBHOOK ALERT CONDITIONS ─────────────────────────────────
+alertcondition(buySignal,  "VIDYA Buy Signal",  "Volumatic VIDYA BUY signal")
+alertcondition(sellSignal, "VIDYA Sell Signal", "Volumatic VIDYA SELL signal")
+
+// ── WEBHOOK JSON ALERTS ──────────────────────────────────────
+if wh_enable and buySignal
+    wh_rr = str.tostring(math.round(wh_tpMult / wh_slMult, 2))
+    wh_msg = '{"indicator_id":"VIDYA","strategy_id":"volumatic_vidya","symbol":"' + syminfo.ticker + '","action":"BUY","risk":1.0,"meta":{"tp":' + str.tostring(wh_buyTP, "#.#####") + ',"sl":' + str.tostring(wh_buySL, "#.#####") + ',"rr":"' + wh_rr + ':1"}}'
+    alert(wh_msg, alert.freq_once_per_bar_close)
+
+if wh_enable and sellSignal
+    wh_rr = str.tostring(math.round(wh_tpMult / wh_slMult, 2))
+    wh_msg = '{"indicator_id":"VIDYA","strategy_id":"volumatic_vidya","symbol":"' + syminfo.ticker + '","action":"SELL","risk":1.0,"meta":{"tp":' + str.tostring(wh_sellTP, "#.#####") + ',"sl":' + str.tostring(wh_sellSL, "#.#####") + ',"rr":"' + wh_rr + ':1"}}'
+    alert(wh_msg, alert.freq_once_per_bar_close)

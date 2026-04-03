@@ -24,7 +24,7 @@ EA_BUILD_DIR = Path(r"C:\Users\DEV\OneDrive\Desktop\EA BUILD")
 MQL5_DIR = Path(r"C:\Users\DEV\AppData\Roaming\MetaQuotes\Terminal\D0E8209F77C8CF37AD8BF550E51FF075\MQL5")
 RESULTS_DIR = EA_BUILD_DIR / "optimizer" / "results"
 SETS_DIR = EA_BUILD_DIR / "optimizer" / "sets"
-MT5_TERMINAL = r"C:\Program Files\MetaTrader 5\terminal64.exe"
+MT5_TERMINAL = r"C:\Users\DEV\OneDrive\Desktop\mt5 clone\MetaTrader 5 - Account 3\terminal64.exe"
 
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 SETS_DIR.mkdir(parents=True, exist_ok=True)
@@ -503,9 +503,9 @@ def copy_ea_files():
     dest_base.mkdir(parents=True, exist_ok=True)
 
     # Folders to copy
-    folders = ["Core", "Indicators", "Trading", "Risk", "Filters", "Utils", "Scalp", "GoldEA", "Grid", "Panel"]
+    folders = ["Core", "Indicators", "Trading", "Risk", "Filters", "Utils", "Scalp", "GoldEA", "Grid", "Panel", "VIDYATrendEA", "DIYStratEA"]
     # Root-level EA files
-    ea_files = ["GoldBB.mq5", "GoldPattern.mq5", "WakaScalp.mq5", "WakaGrid.mq5"]
+    ea_files = [f"{ea}.mq5" for ea in ALL_EAS]
 
     copied = 0
     for f in ea_files:
@@ -613,11 +613,80 @@ def get_iteration_history():
     return json.loads(log_path.read_text(encoding="utf-8"))
 
 
+ALL_EAS = ["GoldBB", "GoldPattern", "WakaGrid", "WakaScalp", "TwoPoleScalp",
+            "VIDYATrend", "ZeroLagScalp", "ZeroLagTrend", "DIYConfluence"]
+
+EA_MAGIC = {
+    "GoldBB": 84590, "GoldPattern": 84600, "WakaGrid": 84570, "WakaScalp": 84580,
+    "TwoPoleScalp": 84590, "VIDYATrend": 84600, "ZeroLagScalp": 84610,
+    "ZeroLagTrend": 84620, "DIYConfluence": 84630,
+}
+
+# Default parameter sets for newer EAs (M5 defaults)
+WAKAGRID_DEFAULTS = {"M5": {
+    "InpInitialTP": 10.0, "InpStopLoss": 1000, "InpATRShort": 96, "InpATRLong": 672,
+    "InpBBPeriod": 35, "InpRSIPeriod": 20, "InpRSIValue": 15, "InpMaxSpread": 30,
+    "InpTradeDistance": 35, "InpSmartDistance": 1, "InpMagic": 84570,
+}}
+
+WAKASCALP_DEFAULTS = {"M5": {
+    "InpSTP_ATRMult": 0.75, "InpSSL_ATRMult": 1.50, "InpSATRPeriod": 14,
+    "InpSATRLongPeriod": 96, "InpSATRMinGate": 0.30, "InpSRSIPeriod": 10,
+    "InpSRSIDeviation": 20, "InpSBBPeriod": 20, "InpSBBDeviation": 2.0,
+    "InpSEMAPeriod": 200, "InpSMaxSpread": 40, "InpSMagic": 84580,
+}}
+
+TWOPOLESCALP_DEFAULTS = {"M5": {
+    "InpTPTP_ATRMult": 0.75, "InpTPSL_ATRMult": 1.50, "InpTPATRPeriod": 14,
+    "InpTPATRLongPeriod": 96, "InpTPATRMinGate": 0.30, "InpTPFilterLength": 15,
+    "InpTPRSIPeriod": 10, "InpTPRSIDeviation": 20, "InpTPEMAPeriod": 200,
+    "InpTPMaxSpread": 40, "InpTPMagic": 84590,
+}}
+
+VIDYATREND_DEFAULTS = {"M5": {
+    "InpVDTP_ATRMult": 1.50, "InpVDSL_ATRMult": 1.00, "InpVDATRPeriod": 14,
+    "InpVDATRLongPeriod": 96, "InpVDATRMinGate": 0.30, "InpVDVIDYALength": 10,
+    "InpVDMomentum": 20, "InpVDBandDist": 2.0, "InpVDRSIPeriod": 14,
+    "InpVDEMAPeriod": 200, "InpVDScoreThreshold": 65, "InpVDMaxSpread": 40,
+    "InpVDMagic": 84600,
+}}
+
+ZEROLAGSCALP_DEFAULTS = {"M5": {
+    "InpZLTP_ATRMult": 1.00, "InpZLSL_ATRMult": 1.50, "InpZLATRPeriod": 14,
+    "InpZLATRLongPeriod": 96, "InpZLATRMinGate": 0.30, "InpZLEMALength": 70,
+    "InpZLBandMult": 1.2, "InpZLRSIPeriod": 10, "InpZLRSIDeviation": 20,
+    "InpZLTrendEMAPeriod": 200, "InpZLMaxSpread": 40, "InpZLMagic": 84610,
+}}
+
+ZEROLAGTREND_DEFAULTS = {"M5": {
+    "InpZTTP_ATRMult": 2.00, "InpZTSL_ATRMult": 1.00, "InpZTATRPeriod": 14,
+    "InpZTATRLongPeriod": 96, "InpZTLength": 70, "InpZTBandMult": 1.2,
+    "InpZTRSIPeriod": 14, "InpZTEMAPeriod": 200, "InpZTScoreThreshold": 60,
+    "InpZTMaxSpread": 40, "InpZTMagic": 84620,
+}}
+
+DIYCONFLUENCE_DEFAULTS = {"M5": {
+    "InpDITP_ATRMult": 2.00, "InpDISL_ATRMult": 1.00, "InpDIATRPeriod": 14,
+    "InpDIATRLongPeriod": 96, "InpDIRangeLength": 100, "InpDIRangeQty": 2.618,
+    "InpDIRangeSmoothN": 5, "InpDIEMAPeriod": 200, "InpDIRSIPeriod": 14,
+    "InpDIScoreThreshold": 60, "InpDIMaxSpread": 40, "InpDIMagic": 84630,
+}}
+
+EA_DEFAULTS_MAP = {
+    "GoldBB": GOLDBB_DEFAULTS, "GoldPattern": GOLDPATTERN_DEFAULTS,
+    "WakaGrid": WAKAGRID_DEFAULTS, "WakaScalp": WAKASCALP_DEFAULTS,
+    "TwoPoleScalp": TWOPOLESCALP_DEFAULTS, "VIDYATrend": VIDYATREND_DEFAULTS,
+    "ZeroLagScalp": ZEROLAGSCALP_DEFAULTS, "ZeroLagTrend": ZEROLAGTREND_DEFAULTS,
+    "DIYConfluence": DIYCONFLUENCE_DEFAULTS,
+}
+
+
 def main():
-    parser = argparse.ArgumentParser(description="MT5 Backtest Runner for GoldBB/GoldPattern")
-    parser.add_argument("--ea", choices=["GoldBB", "GoldPattern"], default="GoldBB")
+    parser = argparse.ArgumentParser(description="MT5 Backtest Runner for all EAs")
+    parser.add_argument("--ea", choices=ALL_EAS, default="GoldBB")
     parser.add_argument("--symbol", default="XAUUSD")
-    parser.add_argument("--tf", choices=["M1", "M5", "M15"], default="M5")
+    parser.add_argument("--tf", choices=["M1", "M5", "M15", "M30", "H1", "H4"], default="M5")
+    parser.add_argument("--batch", action="store_true", help="Run backtest for ALL 9 EAs")
     parser.add_argument("--period", default="2024.01.01-2025.01.01", help="date range: from-to")
     parser.add_argument("--optimize", action="store_true", help="Generate .ini for optimization run")
     parser.add_argument("--forward", action="store_true", help="Take forward test snapshot")
@@ -668,7 +737,7 @@ def main():
     try:
         if args.log_iter:
             # Log an iteration with forward test snapshot as results
-            magic = args.magic or (84590 if args.ea == "GoldBB" else 84600)
+            magic = args.magic or EA_MAGIC.get(args.ea, 84590)
             deals = get_deal_history(magic, args.history)
             perf = calculate_performance(deals)
             params_changed = json.loads(args.params_json) if args.params_json else {}
@@ -692,18 +761,18 @@ def main():
             print(f"Saved: {filepath}")
 
         elif args.forward:
-            magic = args.magic or (84590 if args.ea == "GoldBB" else 84600)
+            magic = args.magic or EA_MAGIC.get(args.ea, 84590)
             snapshot = forward_test_snapshot(magic, args.symbol, args.history)
             print(json.dumps(snapshot["performance"], indent=2))
 
         elif args.gen_set:
-            defaults = GOLDBB_DEFAULTS if args.ea == "GoldBB" else GOLDPATTERN_DEFAULTS
+            defaults = EA_DEFAULTS_MAP.get(args.ea, GOLDBB_DEFAULTS)
             params = defaults.get(args.tf, defaults["M5"])
             set_file = generate_set_file(args.ea, params)
             print(f"Generated: {set_file}")
 
         elif args.optimize:
-            defaults = GOLDBB_DEFAULTS if args.ea == "GoldBB" else GOLDPATTERN_DEFAULTS
+            defaults = EA_DEFAULTS_MAP.get(args.ea, GOLDBB_DEFAULTS)
             params = defaults.get(args.tf, defaults["M5"])
             set_file = generate_set_file(args.ea, params)
             dates = args.period.split("-")
@@ -711,10 +780,28 @@ def main():
             print(f"INI ready: {ini_file}")
             print(f"Run in MT5: terminal64.exe /config:\"{ini_file}\"")
 
+        elif args.batch:
+            # Batch run: generate configs for ALL 9 EAs
+            dates = args.period.split("-")
+            print(f"\n{'='*60}")
+            print(f"BATCH BACKTEST: {len(ALL_EAS)} EAs × {args.symbol} × {args.tf}")
+            print(f"Period: {args.period}")
+            print(f"{'='*60}\n")
+            for ea_name in ALL_EAS:
+                defaults = EA_DEFAULTS_MAP.get(ea_name, {})
+                params = defaults.get(args.tf, defaults.get("M5", {}))
+                if not params:
+                    print(f"  SKIP {ea_name}: no params for {args.tf}")
+                    continue
+                set_file = generate_set_file(ea_name, params)
+                ini_file = generate_ini_file(ea_name, args.symbol, args.tf, dates[0], dates[1], set_file)
+                print(f"  {ea_name}: INI={ini_file}")
+            print(f"\nAll configs ready. Run each with: terminal64.exe /config:<ini_file>")
+
         else:
             # Default: generate set + ini for single backtest run
-            defaults = GOLDBB_DEFAULTS if args.ea == "GoldBB" else GOLDPATTERN_DEFAULTS
-            params = defaults.get(args.tf, defaults["M5"])
+            defaults = EA_DEFAULTS_MAP.get(args.ea, GOLDBB_DEFAULTS)
+            params = defaults.get(args.tf, defaults.get("M5", {}))
             set_file = generate_set_file(args.ea, params)
             dates = args.period.split("-")
             ini_file = generate_ini_file(args.ea, args.symbol, args.tf, dates[0], dates[1], set_file)

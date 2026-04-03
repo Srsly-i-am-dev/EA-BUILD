@@ -1,0 +1,50 @@
+//@version=5
+strategy("Zero Lag Trend Signals [Strategy]", shorttitle="ZeroLag_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         initial_capital=10000, commission_type=strategy.commission.cash_per_order,
+         commission_value=0, slippage=2, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=true)
+
+// ── INPUTS ───────────────────────────────────────────────────
+length = input.int(70, "Length", group="Main Calculations")
+mult_band = input.float(1.2, "Band Multiplier", group="Main Calculations")
+
+// Strategy TP/SL
+strat_atrLen = input.int(14,    "ATR Length",         group="Strategy", minval=1)
+strat_slMult = input.float(1.5, "SL ATR Multiplier",  group="Strategy", minval=0.1, step=0.1)
+strat_tpMult = input.float(2.5, "TP ATR Multiplier",  group="Strategy", minval=0.1, step=0.1)
+
+src = close
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+lag = math.floor((length - 1) / 2)
+zlema = ta.ema(src + (src - src[lag]), length)
+volatility = ta.highest(ta.atr(length), length * 3) * mult_band
+
+var trend = 0
+if ta.crossover(close, zlema + volatility)
+    trend := 1
+if ta.crossunder(close, zlema - volatility)
+    trend := -1
+
+// ── SIGNALS ──────────────────────────────────────────────────
+buySignal  = ta.crossover(close, zlema) and trend == 1 and trend[1] == 1
+sellSignal = ta.crossunder(close, zlema) and trend == -1 and trend[1] == -1
+
+// ── TP/SL ────────────────────────────────────────────────────
+strat_atr = ta.atr(strat_atrLen)
+
+// ── STRATEGY ENTRIES ─────────────────────────────────────────
+if buySignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=close - strat_atr * strat_slMult, limit=close + strat_atr * strat_tpMult)
+
+if sellSignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=close + strat_atr * strat_slMult, limit=close - strat_atr * strat_tpMult)
+
+// ── VISUALS ──────────────────────────────────────────────────
+zlemaColor = trend == 1 ? color.new(color.green, 70) : color.new(color.red, 70)
+plot(zlema, "ZLEMA", zlemaColor, 2)
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)

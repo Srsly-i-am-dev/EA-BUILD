@@ -1,0 +1,59 @@
+//@version=5
+strategy("Two-Pole Oscillator [Strategy]", shorttitle="TwoPole_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         initial_capital=10000, commission_type=strategy.commission.cash_per_order,
+         commission_value=0, slippage=2, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=true)
+
+// ── INPUTS ───────────────────────────────────────────────────
+int   length   = input.int(15, minval=1, title="Filter Length")
+color up_color = input.color(#55ffda, "Up Color", inline="color")
+color dn_color = input.color(#8c5bff, "Down Color", inline="color")
+
+// Strategy TP/SL
+strat_atrLen = input.int(14,    "ATR Length",         group="Strategy", minval=1)
+strat_slMult = input.float(1.5, "SL ATR Multiplier",  group="Strategy", minval=0.1, step=0.1)
+strat_tpMult = input.float(2.0, "TP ATR Multiplier",  group="Strategy", minval=0.1, step=0.1)
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+float sma1   = ta.sma(close, 25)
+float sma_n1 = ((close - sma1) - ta.sma(close - sma1, 25)) / ta.stdev(close - sma1, 25)
+
+f_two_pole_filter(float source, int len) =>
+    var float smooth1 = na
+    var float smooth2 = na
+    alpha = 2.0 / (len + 1)
+    if na(smooth1)
+        smooth1 := source
+    else
+        smooth1 := (1 - alpha) * smooth1 + alpha * source
+    if na(smooth2)
+        smooth2 := smooth1
+    else
+        smooth2 := (1 - alpha) * smooth2 + alpha * smooth1
+    smooth2
+
+two_p  = f_two_pole_filter(sma_n1, length)
+two_pp = two_p[4]
+
+// ── SIGNALS ──────────────────────────────────────────────────
+bool buySignal  = ta.crossover(two_p, two_pp) and two_p < 0
+bool sellSignal = ta.crossunder(two_p, two_pp) and two_p > 0
+
+// ── TP/SL ────────────────────────────────────────────────────
+strat_atr = ta.atr(strat_atrLen)
+strat_sl  = strat_atr * strat_slMult
+strat_tp  = strat_atr * strat_tpMult
+
+// ── STRATEGY ENTRIES ─────────────────────────────────────────
+if buySignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=close - strat_sl, limit=close + strat_tp)
+
+if sellSignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=close + strat_sl, limit=close - strat_tp)
+
+// ── VISUALS ──────────────────────────────────────────────────
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)

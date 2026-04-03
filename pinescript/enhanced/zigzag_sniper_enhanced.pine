@@ -1,0 +1,261 @@
+//@version=5
+indicator("Zigzag Sniper", shorttitle="ZZSniper", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ── INPUTS ───────────────────────────────────────────────────
+i_zzLen        = input.int(5,     "Zigzag Length",        group="Zigzag", minval=2)
+i_maxPivots    = input.int(20,    "Max Pivots",           group="Zigzag", minval=5)
+i_showZZ       = input.bool(true, "Show Zigzag Lines",    group="Zigzag")
+i_showLabels   = input.bool(true, "Show Pivot Labels",    group="Zigzag")
+
+// Pattern
+i_hhhlFilter   = input.bool(true, "HH/HL Filter (Bull)", group="Pattern")
+i_lhllFilter   = input.bool(true, "LH/LL Filter (Bear)", group="Pattern")
+i_minSwingATR  = input.float(1.0, "Min Swing Size (ATR)", group="Pattern", step=0.1)
+
+// Entry
+i_entryMode    = input.string("Break of Structure", "Entry Mode", group="Entry", options=["Break of Structure", "Fib Retrace", "Immediate"])
+i_fibEntry     = input.float(0.618,"Fib Entry Level",    group="Entry", step=0.01)
+i_atrLen       = input.int(14,    "ATR Length",           group="Entry", minval=1)
+
+// TP/SL
+i_slMode       = input.string("Swing Level", "SL Mode", group="TP/SL", options=["Swing Level", "ATR Based"])
+i_slATRMult    = input.float(1.5, "SL ATR Mult",         group="TP/SL", step=0.1)
+i_tpMode       = input.string("Fib Extension", "TP Mode", group="TP/SL", options=["Fib Extension", "ATR Based", "R:R Based"])
+i_tpFibExt     = input.float(1.618,"TP Fib Extension",   group="TP/SL", step=0.01)
+i_tpATRMult    = input.float(2.5, "TP ATR Mult",         group="TP/SL", step=0.1)
+i_tpRR         = input.float(2.0, "TP R:R Ratio",        group="TP/SL", step=0.1)
+
+// Session
+i_useSession   = input.bool(true, "Session Filter",      group="Session")
+
+// ── Webhook / MT5 ────────────────────────────────────────────
+wh_enable     = input.bool(true,   "Enable Webhook Alerts", group="Webhook / MT5")
+wh_atrLen     = input.int(14,      "Webhook ATR Length",    group="Webhook / MT5", minval=1)
+wh_tpMult     = input.float(2.0,   "Webhook TP Mult",      group="Webhook / MT5", step=0.1)
+wh_slMult     = input.float(1.5,   "Webhook SL Mult",      group="Webhook / MT5", step=0.1)
+wh_showLines  = input.bool(true,   "Show Webhook TP/SL",   group="Webhook / MT5")
+
+// ── ZIGZAG ENGINE ────────────────────────────────────────────
+var float[] zzPrices = array.new_float(0)
+var int[]   zzBars   = array.new_int(0)
+var int[]   zzDirs   = array.new_int(0)  // 1=high, -1=low
+var int     zzDir    = 0
+
+isHigh = high == ta.highest(high, i_zzLen)
+isLow  = low == ta.lowest(low, i_zzLen)
+atrVal = ta.atr(i_atrLen)
+
+newZZPivot = false
+zzPrice    = 0.0
+zzBar      = 0
+zzPDir     = 0
+
+if isHigh and not isLow
+    if zzDir != 1
+        if array.size(zzPrices) > 0 or zzDir == 0
+            zzPrice := high
+            zzBar   := bar_index
+            zzPDir  := 1
+            newZZPivot := true
+        zzDir := 1
+    else if array.size(zzPrices) > 0 and high > array.get(zzPrices, 0) and array.get(zzDirs, 0) == 1
+        array.set(zzPrices, 0, high)
+        array.set(zzBars, 0, bar_index)
+
+if isLow and not isHigh
+    if zzDir != -1
+        if array.size(zzPrices) > 0 or zzDir == 0
+            zzPrice := low
+            zzBar   := bar_index
+            zzPDir  := -1
+            newZZPivot := true
+        zzDir := -1
+    else if array.size(zzPrices) > 0 and low < array.get(zzPrices, 0) and array.get(zzDirs, 0) == -1
+        array.set(zzPrices, 0, low)
+        array.set(zzBars, 0, bar_index)
+
+if newZZPivot
+    array.unshift(zzPrices, zzPrice)
+    array.unshift(zzBars, zzBar)
+    array.unshift(zzDirs, zzPDir)
+    while array.size(zzPrices) > i_maxPivots
+        array.pop(zzPrices)
+        array.pop(zzBars)
+        array.pop(zzDirs)
+
+// ── PATTERN CLASSIFICATION ───────────────────────────────────
+// Classify last 4 pivots as HH/HL/LH/LL
+var int pivotPattern = 0  // 1=bullish (HH+HL), -1=bearish (LH+LL)
+
+if array.size(zzPrices) >= 4
+    p0 = array.get(zzPrices, 0)
+    p1 = array.get(zzPrices, 1)
+    p2 = array.get(zzPrices, 2)
+    p3 = array.get(zzPrices, 3)
+    d0 = array.get(zzDirs, 0)
+
+    // Bull: higher high + higher low
+    if d0 == 1  // latest is high
+        isHH = p0 > p2  // current high > prev high
+        isHL = p1 > p3  // current low > prev low
+        if isHH and isHL
+            pivotPattern := 1
+        else
+            pivotPattern := 0
+    if d0 == -1  // latest is low
+        isLH = p1 < p3  // current high < prev high
+        isLL = p0 < p2  // current low < prev low
+        if isLH and isLL
+            pivotPattern := -1
+        else
+            pivotPattern := 0
+
+// ── SIGNALS ──────────────────────────────────────────────────
+inSession = i_useSession ? (hour(time, "UTC") >= 7 and hour(time, "UTC") <= 21) : true
+
+var bool buySignal  = false
+var bool sellSignal = false
+var float buySL     = na
+var float buyTP     = na
+var float sellSL    = na
+var float sellTP    = na
+
+buySignal  := false
+sellSignal := false
+
+if newZZPivot and array.size(zzPrices) >= 4 and inSession
+    p0 = array.get(zzPrices, 0)
+    p1 = array.get(zzPrices, 1)
+    swingSize = math.abs(p0 - p1)
+
+    validSize = swingSize >= atrVal * i_minSwingATR
+
+    // Bullish: pattern confirmed + new low pivot (C point for entry)
+    bullOK = (not i_hhhlFilter or pivotPattern == 1) and zzPDir == -1 and validSize
+    bearOK = (not i_lhllFilter or pivotPattern == -1) and zzPDir == 1 and validSize
+
+    if bullOK
+        entryPrice = close
+        if i_entryMode == "Fib Retrace"
+            entryPrice := p0 + (p1 - p0) * (1 - i_fibEntry)
+
+        // SL
+        if i_slMode == "Swing Level"
+            buySL := p0 - atrVal * 0.2
+        else
+            buySL := entryPrice - atrVal * i_slATRMult
+
+        slDist = math.abs(entryPrice - buySL)
+
+        // TP
+        if i_tpMode == "Fib Extension"
+            abRange = math.abs(p1 - array.get(zzPrices, 2))
+            buyTP := p0 + abRange * i_tpFibExt
+        else if i_tpMode == "ATR Based"
+            buyTP := entryPrice + atrVal * i_tpATRMult
+        else
+            buyTP := entryPrice + slDist * i_tpRR
+
+        buySignal := true
+
+    if bearOK
+        entryPrice = close
+        if i_entryMode == "Fib Retrace"
+            entryPrice := p0 - (p0 - p1) * (1 - i_fibEntry)
+
+        if i_slMode == "Swing Level"
+            sellSL := p0 + atrVal * 0.2
+        else
+            sellSL := entryPrice + atrVal * i_slATRMult
+
+        slDist = math.abs(sellSL - entryPrice)
+
+        if i_tpMode == "Fib Extension"
+            abRange = math.abs(p1 - array.get(zzPrices, 2))
+            sellTP := p0 - abRange * i_tpFibExt
+        else if i_tpMode == "ATR Based"
+            sellTP := entryPrice - atrVal * i_tpATRMult
+        else
+            sellTP := entryPrice - slDist * i_tpRR
+
+        sellSignal := true
+
+// ── VISUALS ──────────────────────────────────────────────────
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)
+
+// Draw zigzag on last bar
+if barstate.islast and i_showZZ and array.size(zzPrices) >= 2
+    for idx = 0 to math.min(array.size(zzPrices) - 2, 15)
+        p1Price = array.get(zzPrices, idx)
+        p2Price = array.get(zzPrices, idx + 1)
+        p1Bar   = array.get(zzBars, idx)
+        p2Bar   = array.get(zzBars, idx + 1)
+        lineCol = p1Price > p2Price ? color.new(color.red, 30) : color.new(color.lime, 30)
+        line.new(p1Bar, p1Price, p2Bar, p2Price, color=lineCol, width=1)
+
+        if i_showLabels
+            d = array.get(zzDirs, idx)
+            lbl = d == 1 ? "H" : "L"
+            lblStyle = d == 1 ? label.style_label_down : label.style_label_up
+            lblColor = d == 1 ? color.new(color.red, 60) : color.new(color.lime, 60)
+            label.new(p1Bar, p1Price, lbl, color=lblColor, textcolor=color.white, style=lblStyle, size=size.tiny)
+
+// TP/SL lines
+if buySignal
+    line.new(bar_index, buyTP, bar_index + 20, buyTP, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
+    line.new(bar_index, buySL, bar_index + 20, buySL, color=color.new(color.red, 30), width=2, style=line.style_dashed)
+
+if sellSignal
+    line.new(bar_index, sellTP, bar_index + 20, sellTP, color=color.new(color.red, 30), width=2, style=line.style_dashed)
+    line.new(bar_index, sellSL, bar_index + 20, sellSL, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
+
+// Info table
+var table tbl = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(tbl, 0, 0, "ZZ Sniper", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, i_entryMode, text_color=color.yellow, text_size=size.small)
+    table.cell(tbl, 0, 1, "Pivots", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 1, str.tostring(array.size(zzPrices)), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 2, "Pattern", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 2, pivotPattern == 1 ? "BULL" : pivotPattern == -1 ? "BEAR" : "FLAT", text_color=pivotPattern == 1 ? color.lime : pivotPattern == -1 ? color.red : color.gray, text_size=size.tiny)
+    table.cell(tbl, 0, 3, "ATR", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 3, str.tostring(atrVal, "#.#####"), text_color=color.white, text_size=size.tiny)
+
+// ── WEBHOOK ENHANCEMENT ──────────────────────────────────────
+wh_atr = ta.atr(wh_atrLen)
+
+// Use existing indicator TP/SL prices
+wh_buyTP  = buySignal  ? buyTP  : na
+wh_buySL  = buySignal  ? buySL  : na
+wh_sellTP = sellSignal ? sellTP : na
+wh_sellSL = sellSignal ? sellSL : na
+
+wh_buyRR  = buySignal  and buySL < close ? str.tostring(math.round((buyTP - close) / (close - buySL), 2)) : "0"
+wh_sellRR = sellSignal and sellSL > close ? str.tostring(math.round((close - sellTP) / (sellSL - close), 2)) : "0"
+
+// Alert conditions
+alertcondition(buySignal,  title="ZZSniper BUY",  message="ZZSniper BUY signal")
+alertcondition(sellSignal, title="ZZSniper SELL", message="ZZSniper SELL signal")
+
+// Webhook JSON alerts
+if wh_enable and buySignal
+    wh_msg = '{"indicator_id":"ZZSniper","strategy_id":"zigzag_sniper","symbol":"' + syminfo.ticker + '","action":"BUY","risk":1.0,"meta":{"tp":' + str.tostring(wh_buyTP, "#.#####") + ',"sl":' + str.tostring(wh_buySL, "#.#####") + ',"rr":"' + wh_buyRR + ':1"}}'
+    alert(wh_msg, alert.freq_once_per_bar_close)
+
+if wh_enable and sellSignal
+    wh_msg = '{"indicator_id":"ZZSniper","strategy_id":"zigzag_sniper","symbol":"' + syminfo.ticker + '","action":"SELL","risk":1.0,"meta":{"tp":' + str.tostring(wh_sellTP, "#.#####") + ',"sl":' + str.tostring(wh_sellSL, "#.#####") + ',"rr":"' + wh_sellRR + ':1"}}'
+    alert(wh_msg, alert.freq_once_per_bar_close)
+
+// Webhook TP/SL chart lines
+if wh_showLines and wh_enable and buySignal
+    line.new(bar_index, wh_buyTP, bar_index + 25, wh_buyTP, color=color.new(color.teal, 20), width=1, style=line.style_dotted)
+    line.new(bar_index, wh_buySL, bar_index + 25, wh_buySL, color=color.new(color.maroon, 20), width=1, style=line.style_dotted)
+    label.new(bar_index + 25, wh_buyTP, "WH-TP", color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
+    label.new(bar_index + 25, wh_buySL, "WH-SL", color=color.new(color.maroon, 20), textcolor=color.white, size=size.tiny)
+
+if wh_showLines and wh_enable and sellSignal
+    line.new(bar_index, wh_sellTP, bar_index + 25, wh_sellTP, color=color.new(color.teal, 20), width=1, style=line.style_dotted)
+    line.new(bar_index, wh_sellSL, bar_index + 25, wh_sellSL, color=color.new(color.maroon, 20), width=1, style=line.style_dotted)
+    label.new(bar_index + 25, wh_sellTP, "WH-TP", color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
+    label.new(bar_index + 25, wh_sellSL, "WH-SL", color=color.new(color.maroon, 20), textcolor=color.white, size=size.tiny)

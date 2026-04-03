@@ -216,7 +216,9 @@ void OnTick()
 
    //--- TP/SL
    double entry_price = (signal == DIR_BUY) ? g_sym.Ask() : g_sym.Bid();
-   if(!g_tp.Calculate(g_indicators, g_sym, entry_price, signal)) return;
+   CBollingerCalc dummy_bb;
+   dummy_bb.Init(2.0);
+   if(!g_tp.Calculate(g_indicators, g_sym, dummy_bb, entry_price, signal)) return;
 
    double tp_price = g_tp.GetTPPrice(entry_price, signal);
    double sl_price = g_tp.GetSLPrice(entry_price, signal);

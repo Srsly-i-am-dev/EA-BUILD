@@ -1,0 +1,115 @@
+//@version=5
+indicator("SMP1 Fib EMA Simple", shorttitle="SMP1", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ── INPUTS ───────────────────────────────────────────────────
+i_emaFast       = input.int(50,    "EMA Fast Period",          group="Signal", minval=5)
+i_emaSlow       = input.int(200,   "EMA Slow Period",          group="Signal", minval=20)
+i_atrPeriod     = input.int(14,    "ATR Period",               group="Signal", minval=1)
+i_swingLookback = input.int(15,    "Swing Lookback Bars",      group="Signal", minval=3)
+i_minImpulseATR = input.float(0.8, "Min Impulse (ATR mult)",   group="Signal", minval=0.1, step=0.1)
+i_impulseBody   = input.float(0.4, "Min Body (ATR mult)",      group="Signal", minval=0.1, step=0.1)
+
+// TP/SL
+i_slMult        = input.float(0.8, "SL ATR Multiplier",        group="TP/SL", minval=0.1, step=0.1)
+i_tpMult        = input.float(1.5, "TP ATR Multiplier",        group="TP/SL", minval=0.1, step=0.1)
+
+// Session Filter
+i_useSession    = input.bool(true,  "Use Session Filter",      group="Session")
+i_sessionStart  = input.int(7,      "Session Start Hour (UTC)", group="Session", minval=0, maxval=23)
+i_sessionEnd    = input.int(21,     "Session End Hour (UTC)",   group="Session", minval=0, maxval=23)
+
+// ── WEBHOOK TP/SL INPUTS ─────────────────────────────────────
+wh_enable      = input.bool(true,  "Enable Webhook Alerts",    group="Webhook / MT5")
+wh_atrLen      = input.int(14,     "ATR Length",               group="Webhook / MT5", minval=1)
+wh_tpMult      = input.float(2.0,  "TP ATR Multiplier",        group="Webhook / MT5", minval=0.1, step=0.1)
+wh_slMult      = input.float(1.0,  "SL ATR Multiplier",        group="Webhook / MT5", minval=0.1, step=0.1)
+wh_showLines   = input.bool(true,  "Show TP/SL Lines on Chart",group="Webhook / MT5")
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+emaFast = ta.ema(close, i_emaFast)
+emaSlow = ta.ema(close, i_emaSlow)
+atrVal  = ta.atr(i_atrPeriod)
+
+bullishTrend = emaFast > emaSlow
+bearishTrend = emaFast < emaSlow
+
+swingHigh = ta.highest(high, i_swingLookback)
+swingLow  = ta.lowest(low, i_swingLookback)
+impulse   = swingHigh - swingLow
+
+impulseValid = impulse >= atrVal * i_minImpulseATR
+bullishCandle = close > open and (close - open) > atrVal * i_impulseBody
+bearishCandle = close < open and (open - close) > atrVal * i_impulseBody
+
+currentHour = hour(time, "UTC")
+inSession = i_useSession ? (currentHour >= i_sessionStart and currentHour <= i_sessionEnd) : true
+
+// Fib zone (0.50 - 0.618 retracement)
+buyFibHi  = swingHigh - impulse * 0.50
+buyFibLo  = swingHigh - impulse * 0.618
+sellFibLo = swingLow + impulse * 0.50
+sellFibHi = swingLow + impulse * 0.618
+
+priceInBuyZone  = close >= buyFibLo and close <= buyFibHi
+priceInSellZone = close >= sellFibLo and close <= sellFibHi
+
+// ── SIGNALS ──────────────────────────────────────────────────
+buySignal  = bullishTrend and impulseValid and bullishCandle and priceInBuyZone and inSession
+sellSignal = bearishTrend and impulseValid and bearishCandle and priceInSellZone and inSession
+
+// ── TP/SL ────────────────────────────────────────────────────
+buyTP  = swingHigh + atrVal * i_tpMult
+buySL  = swingLow - atrVal * i_slMult
+sellTP = swingLow - atrVal * i_tpMult
+sellSL = swingHigh + atrVal * i_slMult
+
+// ── VISUALS ──────────────────────────────────────────────────
+plot(emaFast, "EMA Fast", color.blue, 1)
+plot(emaSlow, "EMA Slow", color.orange, 1)
+
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)
+
+if buySignal
+    line.new(bar_index, buyTP, bar_index + 20, buyTP, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
+    line.new(bar_index, buySL, bar_index + 20, buySL, color=color.new(color.red, 30), width=2, style=line.style_dashed)
+
+if sellSignal
+    line.new(bar_index, sellTP, bar_index + 20, sellTP, color=color.new(color.red, 30), width=2, style=line.style_dashed)
+    line.new(bar_index, sellSL, bar_index + 20, sellSL, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
+
+// ── WEBHOOK ALERTS ───────────────────────────────────────────
+// Use existing TP/SL for webhook
+wh_buyTP  = buyTP
+wh_buySL  = buySL
+wh_sellTP = sellTP
+wh_sellSL = sellSL
+
+wh_buyRR  = buySL != close ? math.abs((wh_buyTP - close) / (close - wh_buySL)) : 0.0
+wh_sellRR = sellSL != close ? math.abs((close - wh_sellTP) / (wh_sellSL - close)) : 0.0
+
+// alertcondition
+alertcondition(buySignal,  title="SMP1 BUY",  message='{"indicator_id":"SMP1","strategy_id":"smp1_fib_ema_simple","symbol":"{{ticker}}","action":"BUY","risk":1.0,"meta":{"tp":{{close}},"sl":{{close}},"rr":"0:1"}}')
+alertcondition(sellSignal, title="SMP1 SELL", message='{"indicator_id":"SMP1","strategy_id":"smp1_fib_ema_simple","symbol":"{{ticker}}","action":"SELL","risk":1.0,"meta":{"tp":{{close}},"sl":{{close}},"rr":"0:1"}}')
+
+// alert() with full JSON payload
+if wh_enable and buySignal
+    wh_buyMsg = '{"indicator_id":"SMP1","strategy_id":"smp1_fib_ema_simple","symbol":"' + syminfo.ticker + '","action":"BUY","risk":1.0,"meta":{"tp":' + str.tostring(wh_buyTP, "#.#####") + ',"sl":' + str.tostring(wh_buySL, "#.#####") + ',"rr":"' + str.tostring(wh_buyRR, "#.##") + ':1"}}'
+    alert(wh_buyMsg, alert.freq_once_per_bar_close)
+
+if wh_enable and sellSignal
+    wh_sellMsg = '{"indicator_id":"SMP1","strategy_id":"smp1_fib_ema_simple","symbol":"' + syminfo.ticker + '","action":"SELL","risk":1.0,"meta":{"tp":' + str.tostring(wh_sellTP, "#.#####") + ',"sl":' + str.tostring(wh_sellSL, "#.#####") + ',"rr":"' + str.tostring(wh_sellRR, "#.##") + ':1"}}'
+    alert(wh_sellMsg, alert.freq_once_per_bar_close)
+
+// ── WEBHOOK TP/SL CHART LINES (last bar) ─────────────────────
+if wh_showLines and barstate.islast
+    if buySignal
+        line.new(bar_index - 1, wh_buyTP, bar_index + 5, wh_buyTP, color=color.new(color.aqua, 20), width=2, style=line.style_dotted)
+        line.new(bar_index - 1, wh_buySL, bar_index + 5, wh_buySL, color=color.new(color.fuchsia, 20), width=2, style=line.style_dotted)
+        label.new(bar_index + 5, wh_buyTP, "WH-TP " + str.tostring(wh_buyTP, "#.##"), color=color.new(color.aqua, 80), textcolor=color.aqua, style=label.style_label_left, size=size.tiny)
+        label.new(bar_index + 5, wh_buySL, "WH-SL " + str.tostring(wh_buySL, "#.##"), color=color.new(color.fuchsia, 80), textcolor=color.fuchsia, style=label.style_label_left, size=size.tiny)
+    if sellSignal
+        line.new(bar_index - 1, wh_sellTP, bar_index + 5, wh_sellTP, color=color.new(color.aqua, 20), width=2, style=line.style_dotted)
+        line.new(bar_index - 1, wh_sellSL, bar_index + 5, wh_sellSL, color=color.new(color.fuchsia, 20), width=2, style=line.style_dotted)
+        label.new(bar_index + 5, wh_sellTP, "WH-TP " + str.tostring(wh_sellTP, "#.##"), color=color.new(color.aqua, 80), textcolor=color.aqua, style=label.style_label_left, size=size.tiny)
+        label.new(bar_index + 5, wh_sellSL, "WH-SL " + str.tostring(wh_sellSL, "#.##"), color=color.new(color.fuchsia, 80), textcolor=color.fuchsia, style=label.style_label_left, size=size.tiny)

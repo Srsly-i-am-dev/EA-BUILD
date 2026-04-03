@@ -1,0 +1,191 @@
+//@version=5
+indicator("Fib Regime 6", shorttitle="FibReg6", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ── SIGNAL INPUTS ────────────────────────────────────────────
+i_emaFast       = input.int(50,    "EMA Fast Period",          group="Signal", minval=5)
+i_emaSlow       = input.int(200,   "EMA Slow Period",          group="Signal", minval=20)
+i_atrPeriod     = input.int(14,    "ATR Fast Period",          group="Signal", minval=1)
+i_swingLookback = input.int(14,    "Swing Lookback Bars",      group="Signal", minval=3)
+i_minImpulseATR = input.float(0.9, "Min Impulse (ATR mult)",   group="Signal", minval=0.1, step=0.1)
+i_impulseBody   = input.float(0.55,"Min Body Ratio",           group="Signal", minval=0.1, step=0.1)
+
+// ── REGIME BLOCKER INPUTS ────────────────────────────────────
+i_regimeEnabled = input.bool(true,  "Enable Regime Blocker",   group="Regime")
+i_atrSlowPeriod = input.int(50,     "ATR Slow Period",         group="Regime", minval=10)
+i_minVolRatio   = input.float(0.80, "Min ATR14/ATR50 Ratio",   group="Regime", minval=0.1, step=0.05)
+i_slopeLookback = input.int(10,     "EMA Slope Lookback",      group="Regime", minval=2)
+i_minSlopeNorm  = input.float(0.30, "Min EMA Slope (ATR-norm)",group="Regime", minval=0.0, step=0.05)
+
+// ── VOLATILITY SCALER INPUTS ─────────────────────────────────
+i_volAdaptive   = input.bool(true,  "Vol-Adaptive SL/TP",      group="Vol Scaler")
+i_volClampMin   = input.float(0.80, "Vol Factor Min",           group="Vol Scaler", minval=0.1, step=0.05)
+i_volClampMax   = input.float(1.40, "Vol Factor Max",           group="Vol Scaler", minval=0.5, step=0.05)
+
+// ── TP/SL INPUTS ─────────────────────────────────────────────
+i_riskMode      = input.string("Multiply Original", "Risk Mode", options=["Original", "ATR From Entry", "Multiply Original", "Custom Pips"], group="TP/SL")
+i_slMult        = input.float(0.85, "SL Multiplier",           group="TP/SL", minval=0.1, step=0.05)
+i_tpMult        = input.float(1.90, "TP Multiplier",           group="TP/SL", minval=0.1, step=0.05)
+i_atrSLMult     = input.float(1.0,  "ATR SL Mult",             group="TP/SL", minval=0.1, step=0.1)
+i_atrTPMult     = input.float(1.5,  "ATR TP Mult",             group="TP/SL", minval=0.1, step=0.1)
+
+// Session
+i_useSession    = input.bool(true,  "Use Session Filter",      group="Session")
+i_sessionStart  = input.int(7,      "Session Start (UTC)",     group="Session", minval=0, maxval=23)
+i_sessionEnd    = input.int(21,     "Session End (UTC)",       group="Session", minval=0, maxval=23)
+
+// ── WEBHOOK TP/SL INPUTS ─────────────────────────────────────
+wh_enable      = input.bool(true,  "Enable Webhook Alerts",    group="Webhook / MT5")
+wh_atrLen      = input.int(14,     "ATR Length",               group="Webhook / MT5", minval=1)
+wh_tpMult      = input.float(2.0,  "TP ATR Multiplier",        group="Webhook / MT5", minval=0.1, step=0.1)
+wh_slMult      = input.float(1.0,  "SL ATR Multiplier",        group="Webhook / MT5", minval=0.1, step=0.1)
+wh_showLines   = input.bool(true,  "Show TP/SL Lines on Chart",group="Webhook / MT5")
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+emaFast   = ta.ema(close, i_emaFast)
+emaSlow   = ta.ema(close, i_emaSlow)
+atrFast   = ta.atr(i_atrPeriod)
+atrSlow   = ta.atr(i_atrSlowPeriod)
+
+bullishTrend = emaFast > emaSlow
+bearishTrend = emaFast < emaSlow
+
+swingHigh = ta.highest(high, i_swingLookback)
+swingLow  = ta.lowest(low, i_swingLookback)
+impulse   = swingHigh - swingLow
+
+impulseValid = impulse >= atrFast * i_minImpulseATR
+
+bodySize  = math.abs(close - open)
+fullRange = high - low
+bodyRatio = fullRange > 0 ? bodySize / fullRange : 0
+
+bullishCandle = close > open and bodyRatio >= i_impulseBody
+bearishCandle = close < open and bodyRatio >= i_impulseBody
+
+currentHour = hour(time, "UTC")
+inSession = i_useSession ? (currentHour >= i_sessionStart and currentHour <= i_sessionEnd) : true
+
+// ── REGIME BLOCKER ───────────────────────────────────────────
+volRatio    = atrSlow > 0 ? atrFast / atrSlow : 0
+emaSlope    = (emaFast - emaFast[i_slopeLookback]) / i_slopeLookback
+emaSlopeNorm = atrFast > 0 ? math.abs(emaSlope) / atrFast : 0
+
+regimeOK = not i_regimeEnabled or (volRatio >= i_minVolRatio and emaSlopeNorm >= i_minSlopeNorm)
+
+// ── VOLATILITY SCALER ────────────────────────────────────────
+volFactor = 1.0
+if i_volAdaptive and atrSlow > 0
+    rawFactor = atrFast / atrSlow
+    volFactor := math.max(i_volClampMin, math.min(i_volClampMax, rawFactor))
+
+// ── FIB ZONE ─────────────────────────────────────────────────
+buyFibHi  = swingHigh - impulse * 0.50
+buyFibLo  = swingHigh - impulse * 0.618
+sellFibLo = swingLow + impulse * 0.50
+sellFibHi = swingLow + impulse * 0.618
+
+priceInBuyZone  = close >= buyFibLo and close <= buyFibHi
+priceInSellZone = close >= sellFibLo and close <= sellFibHi
+
+// ── SIGNALS ──────────────────────────────────────────────────
+buySignal  = bullishTrend and impulseValid and bullishCandle and priceInBuyZone and inSession and regimeOK
+sellSignal = bearishTrend and impulseValid and bearishCandle and priceInSellZone and inSession and regimeOK
+
+// ── TP/SL CALCULATION ────────────────────────────────────────
+float buyTP = na, float buySL = na
+float sellTP = na, float sellSL = na
+
+// Original distances
+origBuySL_dist  = close - (swingLow - atrFast * 0.8)
+origBuyTP_dist  = (swingHigh + atrFast * 1.5) - close
+origSellSL_dist = (swingHigh + atrFast * 0.8) - close
+origSellTP_dist = close - (swingLow - atrFast * 1.5)
+
+if i_riskMode == "Original"
+    buySL  := swingLow - atrFast * 0.8
+    buyTP  := swingHigh + atrFast * 1.5
+    sellSL := swingHigh + atrFast * 0.8
+    sellTP := swingLow - atrFast * 1.5
+else if i_riskMode == "ATR From Entry"
+    buySL  := close - atrFast * i_atrSLMult * volFactor
+    buyTP  := close + atrFast * i_atrTPMult * volFactor
+    sellSL := close + atrFast * i_atrSLMult * volFactor
+    sellTP := close - atrFast * i_atrTPMult * volFactor
+else if i_riskMode == "Multiply Original"
+    buySL  := close - origBuySL_dist * i_slMult * volFactor
+    buyTP  := close + origBuyTP_dist * i_tpMult * volFactor
+    sellSL := close + origSellSL_dist * i_slMult * volFactor
+    sellTP := close - origSellTP_dist * i_tpMult * volFactor
+else // Custom Pips - use ATR as fallback
+    buySL  := close - atrFast * i_atrSLMult
+    buyTP  := close + atrFast * i_atrTPMult
+    sellSL := close + atrFast * i_atrSLMult
+    sellTP := close - atrFast * i_atrTPMult
+
+// ── VISUALS ──────────────────────────────────────────────────
+plot(emaFast, "EMA Fast", color.blue, 1)
+plot(emaSlow, "EMA Slow", color.orange, 1)
+
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)
+
+// Regime status background
+bgcolor(i_regimeEnabled and not regimeOK ? color.new(color.gray, 90) : na, title="Regime Blocked")
+
+if buySignal
+    line.new(bar_index, buyTP, bar_index + 20, buyTP, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
+    line.new(bar_index, buySL, bar_index + 20, buySL, color=color.new(color.red, 30), width=2, style=line.style_dashed)
+
+if sellSignal
+    line.new(bar_index, sellTP, bar_index + 20, sellTP, color=color.new(color.red, 30), width=2, style=line.style_dashed)
+    line.new(bar_index, sellSL, bar_index + 20, sellSL, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
+
+// ── INFO TABLE ───────────────────────────────────────────────
+var table tbl = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(tbl, 0, 0, "Fib Regime 6", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, i_riskMode, text_color=color.yellow, text_size=size.small)
+    table.cell(tbl, 0, 1, "Vol Ratio", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 1, str.tostring(volRatio, "#.##"), text_color=volRatio >= i_minVolRatio ? color.lime : color.red, text_size=size.tiny)
+    table.cell(tbl, 0, 2, "EMA Slope", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 2, str.tostring(emaSlopeNorm, "#.##"), text_color=emaSlopeNorm >= i_minSlopeNorm ? color.lime : color.red, text_size=size.tiny)
+    table.cell(tbl, 0, 3, "Regime", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 3, regimeOK ? "PASS" : "BLOCKED", text_color=regimeOK ? color.lime : color.red, text_size=size.tiny)
+    table.cell(tbl, 0, 4, "Vol Factor", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 4, str.tostring(volFactor, "#.##"), text_color=color.white, text_size=size.tiny)
+
+// ── WEBHOOK ALERTS ───────────────────────────────────────────
+// Use existing TP/SL for webhook
+wh_buyTP  = buyTP
+wh_buySL  = buySL
+wh_sellTP = sellTP
+wh_sellSL = sellSL
+
+wh_buyRR  = buySL != close and not na(buySL) ? math.abs((wh_buyTP - close) / (close - wh_buySL)) : 0.0
+wh_sellRR = sellSL != close and not na(sellSL) ? math.abs((close - wh_sellTP) / (wh_sellSL - close)) : 0.0
+
+// alertcondition
+alertcondition(buySignal,  title="FibReg6 BUY",  message='{"indicator_id":"FibReg6","strategy_id":"fib_regime_6","symbol":"{{ticker}}","action":"BUY","risk":1.0,"meta":{"tp":{{close}},"sl":{{close}},"rr":"0:1"}}')
+alertcondition(sellSignal, title="FibReg6 SELL", message='{"indicator_id":"FibReg6","strategy_id":"fib_regime_6","symbol":"{{ticker}}","action":"SELL","risk":1.0,"meta":{"tp":{{close}},"sl":{{close}},"rr":"0:1"}}')
+
+// alert() with full JSON payload
+if wh_enable and buySignal
+    wh_buyMsg = '{"indicator_id":"FibReg6","strategy_id":"fib_regime_6","symbol":"' + syminfo.ticker + '","action":"BUY","risk":1.0,"meta":{"tp":' + str.tostring(wh_buyTP, "#.#####") + ',"sl":' + str.tostring(wh_buySL, "#.#####") + ',"rr":"' + str.tostring(wh_buyRR, "#.##") + ':1"}}'
+    alert(wh_buyMsg, alert.freq_once_per_bar_close)
+
+if wh_enable and sellSignal
+    wh_sellMsg = '{"indicator_id":"FibReg6","strategy_id":"fib_regime_6","symbol":"' + syminfo.ticker + '","action":"SELL","risk":1.0,"meta":{"tp":' + str.tostring(wh_sellTP, "#.#####") + ',"sl":' + str.tostring(wh_sellSL, "#.#####") + ',"rr":"' + str.tostring(wh_sellRR, "#.##") + ':1"}}'
+    alert(wh_sellMsg, alert.freq_once_per_bar_close)
+
+// ── WEBHOOK TP/SL CHART LINES (last bar) ─────────────────────
+if wh_showLines and barstate.islast
+    if buySignal
+        line.new(bar_index - 1, wh_buyTP, bar_index + 5, wh_buyTP, color=color.new(color.aqua, 20), width=2, style=line.style_dotted)
+        line.new(bar_index - 1, wh_buySL, bar_index + 5, wh_buySL, color=color.new(color.fuchsia, 20), width=2, style=line.style_dotted)
+        label.new(bar_index + 5, wh_buyTP, "WH-TP " + str.tostring(wh_buyTP, "#.##"), color=color.new(color.aqua, 80), textcolor=color.aqua, style=label.style_label_left, size=size.tiny)
+        label.new(bar_index + 5, wh_buySL, "WH-SL " + str.tostring(wh_buySL, "#.##"), color=color.new(color.fuchsia, 80), textcolor=color.fuchsia, style=label.style_label_left, size=size.tiny)
+    if sellSignal
+        line.new(bar_index - 1, wh_sellTP, bar_index + 5, wh_sellTP, color=color.new(color.aqua, 20), width=2, style=line.style_dotted)
+        line.new(bar_index - 1, wh_sellSL, bar_index + 5, wh_sellSL, color=color.new(color.fuchsia, 20), width=2, style=line.style_dotted)
+        label.new(bar_index + 5, wh_sellTP, "WH-TP " + str.tostring(wh_sellTP, "#.##"), color=color.new(color.aqua, 80), textcolor=color.aqua, style=label.style_label_left, size=size.tiny)
+        label.new(bar_index + 5, wh_sellSL, "WH-SL " + str.tostring(wh_sellSL, "#.##"), color=color.new(color.fuchsia, 80), textcolor=color.fuchsia, style=label.style_label_left, size=size.tiny)

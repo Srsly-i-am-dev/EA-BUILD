@@ -1,0 +1,70 @@
+//@version=5
+strategy("VWAP Institutional Stack [Strategy]", shorttitle="VWAPInst_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         initial_capital=10000, commission_type=strategy.commission.cash_per_order,
+         commission_value=0, slippage=2, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=true)
+
+// ── INPUTS ───────────────────────────────────────────────────
+i_sdMult1      = input.float(1.0, "SD Band 1 Mult", group="Bands", minval=0.1, step=0.1)
+i_sdMult2      = input.float(2.0, "SD Band 2 Mult", group="Bands", minval=0.1, step=0.1)
+i_volLen       = input.int(20, "Volume MA Length",   group="Volume", minval=1)
+i_rejWickRatio = input.float(0.6, "Wick Ratio",     group="Entry", minval=0.1, step=0.1)
+
+// Strategy
+strat_atrLen = input.int(14,    "ATR Length",         group="Strategy", minval=1)
+strat_slMult = input.float(1.5, "SL ATR Mult",       group="Strategy", minval=0.1, step=0.1)
+strat_tpMult = input.float(2.5, "TP ATR Mult",       group="Strategy", minval=0.1, step=0.1)
+
+// ── VWAP ─────────────────────────────────────────────────────
+dailyVwap = ta.vwap(hlc3)
+cumVol    = ta.cum(volume)
+cumVolSrc = ta.cum(hlc3 * volume)
+cumVolSq  = ta.cum(hlc3 * hlc3 * volume)
+dailyMean = cumVolSrc / cumVol
+dailyVar  = cumVolSq / cumVol - dailyMean * dailyMean
+dailySD   = math.sqrt(math.max(dailyVar, 0))
+
+dailyUpper2 = dailyVwap + dailySD * i_sdMult2
+dailyLower2 = dailyVwap - dailySD * i_sdMult2
+
+weeklyVwap  = request.security(syminfo.tickerid, "W", ta.vwap(hlc3))
+monthlyVwap = request.security(syminfo.tickerid, "M", ta.vwap(hlc3))
+
+// ── VOLUME ───────────────────────────────────────────────────
+volMA   = ta.sma(volume, i_volLen)
+highVol = volume > volMA * 1.5
+
+// ── ENTRY ────────────────────────────────────────────────────
+fullRange = high - low
+lowerWick = math.min(close, open) - low
+upperWick = high - math.max(close, open)
+
+bullRejection = lowerWick > fullRange * i_rejWickRatio and close > open and math.abs(low - dailyVwap) < dailySD * 0.3
+bearRejection = upperWick > fullRange * i_rejWickRatio and close < open and math.abs(high - dailyVwap) < dailySD * 0.3
+
+bullStack = close > weeklyVwap and close > monthlyVwap
+bearStack = close < weeklyVwap and close < monthlyVwap
+
+buySignal  = bullRejection and highVol and bullStack
+sellSignal = bearRejection and highVol and bearStack
+
+// Mean reversion at extremes
+meanRevBuy  = close <= dailyLower2 and bullStack and highVol
+meanRevSell = close >= dailyUpper2 and bearStack and highVol
+
+// ── STRATEGY ENTRIES ─────────────────────────────────────────
+atrVal = ta.atr(strat_atrLen)
+
+if buySignal or meanRevBuy
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=close - atrVal * strat_slMult, limit=close + atrVal * strat_tpMult)
+
+if sellSignal or meanRevSell
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=close + atrVal * strat_slMult, limit=close - atrVal * strat_tpMult)
+
+// ── VISUALS ──────────────────────────────────────────────────
+plot(dailyVwap, "VWAP", color.blue, 2)
+plotshape(buySignal or meanRevBuy,   "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal or meanRevSell, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)

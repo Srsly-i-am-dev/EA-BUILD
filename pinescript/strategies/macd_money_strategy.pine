@@ -1,0 +1,101 @@
+//@version=5
+strategy("MACD Money Map [Strategy]", shorttitle="MACDMoney_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         initial_capital=10000, commission_type=strategy.commission.cash_per_order,
+         commission_value=0, slippage=2, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=true)
+
+// ── INPUTS ───────────────────────────────────────────────────
+i_fastLen  = input.int(12,  "MACD Fast Length",    group="MACD", minval=1)
+i_slowLen  = input.int(26,  "MACD Slow Length",    group="MACD", minval=1)
+i_sigLen   = input.int(9,   "Signal Line Length",  group="MACD", minval=1)
+i_system   = input.string("System 1: Trend", "Active System", options=["System 1: Trend", "System 2: Reversal", "System 3: MTF Confirmation"], group="System")
+i_distRule = input.float(0.5, "Zero Line Distance", group="System 1", minval=0.0, step=0.1)
+i_confirmBars = input.int(2, "Confirm Bars",        group="System 1", minval=0, maxval=5)
+i_divLookback = input.int(30, "Div Lookback",       group="System 2", minval=10)
+i_htfTrend  = input.timeframe("D",   "Trend TF",   group="System 3")
+i_htfSetup  = input.timeframe("240", "Setup TF",    group="System 3")
+
+// Strategy TP/SL
+strat_atrLen = input.int(14,    "ATR Length",         group="Strategy", minval=1)
+strat_slMult = input.float(1.5, "SL ATR Multiplier",  group="Strategy", minval=0.1, step=0.1)
+strat_rrTarget = input.float(2.0, "R:R Target",       group="Strategy", minval=0.5, step=0.5)
+
+// ── MACD ─────────────────────────────────────────────────────
+[macdLine, signalLine, histLine] = ta.macd(close, i_fastLen, i_slowLen, i_sigLen)
+
+// ── SYSTEM 1: TREND ──────────────────────────────────────────
+macdCrossUp   = ta.crossover(macdLine, signalLine)
+macdCrossDown = ta.crossunder(macdLine, signalLine)
+s1_buyRaw  = macdCrossUp and macdLine > i_distRule
+s1_sellRaw = macdCrossDown and macdLine < -i_distRule
+
+var int s1_buyAge  = 999
+var int s1_sellAge = 999
+s1_buyAge  := s1_buyRaw  ? 0 : s1_buyAge + 1
+s1_sellAge := s1_sellRaw ? 0 : s1_sellAge + 1
+s1_buy  = s1_buyAge == i_confirmBars
+s1_sell = s1_sellAge == i_confirmBars
+
+// ── SYSTEM 2: REVERSAL ───────────────────────────────────────
+histFlipBull = histLine > 0 and histLine[1] <= 0
+histFlipBear = histLine < 0 and histLine[1] >= 0
+histShrinkBull = histLine < 0 and histLine > histLine[1]
+histShrinkBear = histLine > 0 and histLine < histLine[1]
+
+s2_priceLow1 = ta.lowest(low, i_divLookback)
+s2_macdLow1  = ta.lowest(macdLine, i_divLookback)
+s2_priceHigh1 = ta.highest(high, i_divLookback)
+s2_macdHigh1  = ta.highest(macdLine, i_divLookback)
+
+var bool bullDiv = false
+var bool bearDiv = false
+if low <= s2_priceLow1[1] and macdLine > s2_macdLow1[1] and macdLine < 0
+    bullDiv := true
+if histFlipBull
+    bullDiv := false
+if high >= s2_priceHigh1[1] and macdLine < s2_macdHigh1[1] and macdLine > 0
+    bearDiv := true
+if histFlipBear
+    bearDiv := false
+
+s2_buy  = bullDiv and (histFlipBull or histShrinkBull)
+s2_sell = bearDiv and (histFlipBear or histShrinkBear)
+if s2_buy
+    bullDiv := false
+if s2_sell
+    bearDiv := false
+
+// ── SYSTEM 3: MTF ────────────────────────────────────────────
+[htfMacd_trend, htfSig_trend, _] = request.security(syminfo.tickerid, i_htfTrend, ta.macd(close, i_fastLen, i_slowLen, i_sigLen))
+[htfMacd_setup, htfSig_setup, _htf2] = request.security(syminfo.tickerid, i_htfSetup, ta.macd(close, i_fastLen, i_slowLen, i_sigLen))
+
+s3_buy  = htfMacd_trend > htfSig_trend and htfMacd_setup > htfSig_setup and htfMacd_setup[1] <= htfSig_setup[1] and histFlipBull
+s3_sell = htfMacd_trend < htfSig_trend and htfMacd_setup < htfSig_setup and htfMacd_setup[1] >= htfSig_setup[1] and histFlipBear
+
+// ── ACTIVE SYSTEM ────────────────────────────────────────────
+buySignal  = i_system == "System 1: Trend" ? s1_buy : i_system == "System 2: Reversal" ? s2_buy : s3_buy
+sellSignal = i_system == "System 1: Trend" ? s1_sell : i_system == "System 2: Reversal" ? s2_sell : s3_sell
+
+// ── STRATEGY ENTRIES ─────────────────────────────────────────
+strat_atr = ta.atr(strat_atrLen)
+strat_sl  = strat_atr * strat_slMult
+strat_tp  = strat_sl * strat_rrTarget
+
+if buySignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=close - strat_sl, limit=close + strat_tp)
+
+if sellSignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=close + strat_sl, limit=close - strat_tp)
+
+// Exit on opposite MACD crossover (trailing stop logic)
+if macdCrossDown and strategy.position_size > 0
+    strategy.close("Long", comment="MACD Cross Exit")
+if macdCrossUp and strategy.position_size < 0
+    strategy.close("Short", comment="MACD Cross Exit")
+
+// ── VISUALS ──────────────────────────────────────────────────
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)

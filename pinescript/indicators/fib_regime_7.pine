@@ -1,0 +1,120 @@
+//@version=5
+indicator("Fib Regime 7", shorttitle="FibReg7", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ── INPUTS ───────────────────────────────────────────────────
+i_emaFast       = input.int(50,    "EMA Fast",         group="Signal", minval=5)
+i_emaSlow       = input.int(200,   "EMA Slow",         group="Signal", minval=20)
+i_atrPeriod     = input.int(14,    "ATR Fast",         group="Signal", minval=1)
+i_swingLookback = input.int(14,    "Swing Lookback",   group="Signal", minval=3)
+i_minImpulseATR = input.float(0.9, "Min Impulse",      group="Signal", minval=0.1, step=0.1)
+i_impulseBody   = input.float(0.55,"Body Ratio",       group="Signal", minval=0.1, step=0.1)
+
+// Regime
+i_regimeEnabled = input.bool(true,  "Regime Blocker",   group="Regime")
+i_atrSlowPeriod = input.int(50,     "ATR Slow",         group="Regime", minval=10)
+i_minVolRatio   = input.float(0.80, "Min Vol Ratio",    group="Regime", step=0.05)
+i_slopeLookback = input.int(10,     "Slope Lookback",   group="Regime", minval=2)
+i_minSlopeNorm  = input.float(0.30, "Min Slope",        group="Regime", step=0.05)
+
+// Vol Scaler
+i_volAdaptive   = input.bool(true,  "Vol-Adaptive",     group="Vol Scaler")
+i_volClampMin   = input.float(0.80, "Clamp Min",        group="Vol Scaler", step=0.05)
+i_volClampMax   = input.float(1.40, "Clamp Max",        group="Vol Scaler", step=0.05)
+
+// TP/SL with Guardrails (Regime 7 addition)
+i_slMult        = input.float(0.85, "SL Mult",          group="TP/SL", step=0.05)
+i_tpMult        = input.float(1.90, "TP Mult",          group="TP/SL", step=0.05)
+i_minSLPips     = input.float(10.0, "Min SL (points)",  group="Guardrails", minval=0, step=1)
+i_maxSLPips     = input.float(500.0,"Max SL (points)",  group="Guardrails", minval=10, step=10)
+i_minTPPips     = input.float(15.0, "Min TP (points)",  group="Guardrails", minval=0, step=1)
+i_maxTPPips     = input.float(1000.0,"Max TP (points)", group="Guardrails", minval=10, step=10)
+i_maxRR         = input.float(6.0,  "Max R:R Ratio",    group="Guardrails", minval=1.0, step=0.5)
+
+// Session
+i_useSession    = input.bool(true, "Session Filter",    group="Session")
+
+// ── CALCULATIONS ─────────────────────────────────────────────
+emaFast  = ta.ema(close, i_emaFast)
+emaSlow  = ta.ema(close, i_emaSlow)
+atrFast  = ta.atr(i_atrPeriod)
+atrSlow  = ta.atr(i_atrSlowPeriod)
+
+swingHigh = ta.highest(high, i_swingLookback)
+swingLow  = ta.lowest(low, i_swingLookback)
+impulse   = swingHigh - swingLow
+
+bodyRatio = (high - low) > 0 ? math.abs(close - open) / (high - low) : 0
+volRatio  = atrSlow > 0 ? atrFast / atrSlow : 0
+emaSlope  = (emaFast - emaFast[i_slopeLookback]) / i_slopeLookback
+slopeNorm = atrFast > 0 ? math.abs(emaSlope) / atrFast : 0
+regimeOK  = not i_regimeEnabled or (volRatio >= i_minVolRatio and slopeNorm >= i_minSlopeNorm)
+
+volFactor = 1.0
+if i_volAdaptive and atrSlow > 0
+    volFactor := math.max(i_volClampMin, math.min(i_volClampMax, atrFast / atrSlow))
+
+buyFibHi  = swingHigh - impulse * 0.50
+buyFibLo  = swingHigh - impulse * 0.618
+sellFibLo = swingLow + impulse * 0.50
+sellFibHi = swingLow + impulse * 0.618
+
+inSession = i_useSession ? (hour(time, "UTC") >= 7 and hour(time, "UTC") <= 21) : true
+
+buySignal  = emaFast > emaSlow and impulse >= atrFast * i_minImpulseATR and close > open and bodyRatio >= i_impulseBody and close >= buyFibLo and close <= buyFibHi and inSession and regimeOK
+sellSignal = emaFast < emaSlow and impulse >= atrFast * i_minImpulseATR and close < open and bodyRatio >= i_impulseBody and close >= sellFibLo and close <= sellFibHi and inSession and regimeOK
+
+// ── TP/SL WITH GUARDRAILS ────────────────────────────────────
+origBuySL  = (close - (swingLow - atrFast * 0.8)) * i_slMult * volFactor
+origBuyTP  = ((swingHigh + atrFast * 1.5) - close) * i_tpMult * volFactor
+origSellSL = ((swingHigh + atrFast * 0.8) - close) * i_slMult * volFactor
+origSellTP = (close - (swingLow - atrFast * 1.5)) * i_tpMult * volFactor
+
+// Clamp SL/TP to guardrail bounds
+buySL_clamped  = math.max(i_minSLPips, math.min(i_maxSLPips, origBuySL))
+buyTP_clamped  = math.max(i_minTPPips, math.min(i_maxTPPips, origBuyTP))
+sellSL_clamped = math.max(i_minSLPips, math.min(i_maxSLPips, origSellSL))
+sellTP_clamped = math.max(i_minTPPips, math.min(i_maxTPPips, origSellTP))
+
+// R:R cap
+buyRR  = buySL_clamped > 0 ? buyTP_clamped / buySL_clamped : 0
+sellRR = sellSL_clamped > 0 ? sellTP_clamped / sellSL_clamped : 0
+
+if buyRR > i_maxRR
+    buyTP_clamped := buySL_clamped * i_maxRR
+
+if sellRR > i_maxRR
+    sellTP_clamped := sellSL_clamped * i_maxRR
+
+float buySL_price  = close - buySL_clamped
+float buyTP_price  = close + buyTP_clamped
+float sellSL_price = close + sellSL_clamped
+float sellTP_price = close - sellTP_clamped
+
+// ── VISUALS ──────────────────────────────────────────────────
+plot(emaFast, "EMA Fast", color.blue, 1)
+plot(emaSlow, "EMA Slow", color.orange, 1)
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,  size=size.small)
+bgcolor(i_regimeEnabled and not regimeOK ? color.new(color.gray, 90) : na)
+
+if buySignal
+    line.new(bar_index, buyTP_price, bar_index + 20, buyTP_price, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
+    line.new(bar_index, buySL_price, bar_index + 20, buySL_price, color=color.new(color.red, 30), width=2, style=line.style_dashed)
+
+if sellSignal
+    line.new(bar_index, sellTP_price, bar_index + 20, sellTP_price, color=color.new(color.red, 30), width=2, style=line.style_dashed)
+    line.new(bar_index, sellSL_price, bar_index + 20, sellSL_price, color=color.new(color.lime, 30), width=2, style=line.style_dashed)
+
+// Info table
+var table tbl = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(tbl, 0, 0, "Fib Regime 7", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, "Guardrails", text_color=color.yellow, text_size=size.small)
+    table.cell(tbl, 0, 1, "Vol Ratio", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 1, str.tostring(volRatio, "#.##"), text_color=volRatio >= i_minVolRatio ? color.lime : color.red, text_size=size.tiny)
+    table.cell(tbl, 0, 2, "Regime", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 2, regimeOK ? "PASS" : "BLOCKED", text_color=regimeOK ? color.lime : color.red, text_size=size.tiny)
+    table.cell(tbl, 0, 3, "Vol Factor", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 3, str.tostring(volFactor, "#.##"), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 4, "Max R:R", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 4, str.tostring(i_maxRR, "#.#") + ":1", text_color=color.white, text_size=size.tiny)

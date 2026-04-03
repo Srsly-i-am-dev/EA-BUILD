@@ -1,0 +1,90 @@
+//@version=5
+strategy("ABC Ulti V2 [Strategy]", shorttitle="ABCUltiV2_strat", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         initial_capital=10000, commission_type=strategy.commission.cash_per_order,
+         commission_value=0, slippage=2, pyramiding=0,
+         calc_on_every_tick=false, process_orders_on_close=true)
+
+// ── INPUTS ───────────────────────────────────────────────────
+i_zigzagLen = input.int(10,     "Zigzag Sensitivity",  group="Pattern", minval=2)
+i_minRet    = input.float(0.236,"Min BC Retrace",      group="Pattern", step=0.01)
+i_maxRet    = input.float(0.886,"Max BC Retrace",      group="Pattern", step=0.01)
+i_fibExt1   = input.float(1.618,"Fib Extension T1",    group="Targets", step=0.01)
+i_invLevel  = input.float(0.886,"Invalidation Level",   group="Targets", step=0.01)
+
+// ── ZIGZAG ───────────────────────────────────────────────────
+var float[] zigP = array.new_float(0)
+var int[]   zigB = array.new_int(0)
+var int[]   zigD = array.new_int(0)
+var int     zDir = 0
+
+isH = high == ta.highest(high, i_zigzagLen)
+isL = low == ta.lowest(low, i_zigzagLen)
+
+newPiv = false
+pPrice = 0.0
+pBar   = 0
+pDir   = 0
+
+if isH and not isL
+    if zDir != 1
+        if array.size(zigP) > 0 or zDir == 0
+            pPrice := high
+            pBar   := bar_index
+            pDir   := 1
+            newPiv := true
+        zDir := 1
+    else if array.size(zigP) > 0 and high > array.get(zigP, 0) and array.get(zigD, 0) == 1
+        array.set(zigP, 0, high)
+        array.set(zigB, 0, bar_index)
+
+if isL and not isH
+    if zDir != -1
+        if array.size(zigP) > 0 or zDir == 0
+            pPrice := low
+            pBar   := bar_index
+            pDir   := -1
+            newPiv := true
+        zDir := -1
+    else if array.size(zigP) > 0 and low < array.get(zigP, 0) and array.get(zigD, 0) == -1
+        array.set(zigP, 0, low)
+        array.set(zigB, 0, bar_index)
+
+if newPiv
+    array.unshift(zigP, pPrice)
+    array.unshift(zigB, pBar)
+    array.unshift(zigD, pDir)
+    while array.size(zigP) > 50
+        array.pop(zigP)
+        array.pop(zigB)
+        array.pop(zigD)
+
+// ── ABC DETECTION + ENTRIES ──────────────────────────────────
+if newPiv and array.size(zigP) >= 4
+    cP = array.get(zigP, 0)
+    bP = array.get(zigP, 1)
+    aP = array.get(zigP, 2)
+    cD = array.get(zigD, 0)
+    abR = math.abs(bP - aP)
+
+    if abR > 0
+        bcR = math.abs(cP - bP) / abR
+        if bcR >= i_minRet and bcR <= i_maxRet
+            // Bullish ABC
+            if cD == -1 and bP > aP and cP > aP and cP < bP
+                t1 = cP + abR * i_fibExt1
+                inv = cP - abR * (i_invLevel - 0.5)
+                sl = math.min(aP, inv)
+                strategy.entry("Long", strategy.long)
+                strategy.exit("Long Exit", "Long", stop=sl, limit=t1)
+
+            // Bearish ABC
+            if cD == 1 and bP < aP and cP < aP and cP > bP
+                t1 = cP - abR * i_fibExt1
+                inv = cP + abR * (i_invLevel - 0.5)
+                sl = math.max(aP, inv)
+                strategy.entry("Short", strategy.short)
+                strategy.exit("Short Exit", "Short", stop=sl, limit=t1)
+
+// ── VISUALS ──────────────────────────────────────────────────
+plot(close, display=display.none)
